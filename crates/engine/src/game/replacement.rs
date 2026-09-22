@@ -7296,8 +7296,21 @@ fn object_replacement_candidate_applies(
     // zone half is declared on the definition (`active_zones = [Graveyard]`);
     // only this threshold depends on live library size, so only this half is
     // evaluated here.
+    //
+    // Deliberately `printed_dredge_value`, not `effective_dredge_value`: this
+    // `repl_def` was read from `obj.replacement_definitions` above, which is
+    // populated ONLY by build-time `synthesize_dredge` for a PRINTED Dredge
+    // keyword with the printed N baked into its mill effect (a granted-only
+    // Dredge card, e.g. a Necrobloom-animated land, never gets an entry there
+    // — `find_applicable_replacements`'s separate granted-dredge registration
+    // block surfaces that virtual candidate and applies its own CR 702.52b
+    // gate against the granted value). Gating THIS candidate's legality with
+    // the effective (grant-overridden) value would compare the wrong number
+    // when a grant is simultaneously active with a different N than the
+    // printed one — CR 702.52b judges each dredge ability by ITS OWN N, not a
+    // sibling ability's.
     if repl_def.event == ReplacementEvent::Draw && obj.zone == Zone::Graveyard {
-        if let Some(dredge) = crate::game::keywords::effective_dredge_value(state, obj.id) {
+        if let Some(dredge) = printed_dredge_value(obj) {
             let library_size = state
                 .players
                 .iter()
@@ -15601,6 +15614,84 @@ mod tests {
             1,
             "a grant matching the printed value must collapse to the single \
              object-carried candidate, got {candidates:?}"
+        );
+    }
+
+    /// CR 702.52b boundary regression: `object_replacement_candidate_applies`'s
+    /// library-size gate on the PRINTED candidate must compare against the
+    /// PRINTED N, not the grant-overridden effective value. `dredge_state`
+    /// bakes in printed dredge 2 (Dakmor Salvage-shaped). Here an independent
+    /// effect additionally grants dredge 5 to the same graveyard object, and
+    /// the library sits strictly between the two values (3: `>= 2`, `< 5`).
+    ///
+    /// CR 702.52b judges each dredge ability by its own N: the printed
+    /// dredge-2 ability is legal (library 3 >= 2) and the granted dredge-5
+    /// ability is illegal (3 < 5). Before the fix, the printed candidate's
+    /// gate read `effective_dredge_value` — which resolves to the GRANTED 5
+    /// whenever a grant is active, because `upsert_keyword_contribution`
+    /// overwrites same-kind contributions for non-summing keywords (Dredge is
+    /// not in `instances_must_coexist`) — so `3 < 5` wrongly excluded the
+    /// legal printed-2 candidate too. This asserts the fixed behavior: the
+    /// printed candidate survives and the granted candidate is correctly
+    /// gated out, so exactly one candidate remains.
+    #[test]
+    fn printed_dredge_gate_uses_printed_value_not_grant_overridden_effective_value() {
+        let mut state = dredge_state(3);
+        state.players[0].graveyard.push_back(ObjectId(10));
+
+        let granter = ObjectId(99);
+        state.objects.insert(
+            granter,
+            GameObject::new(
+                granter,
+                CardId(99),
+                PlayerId(0),
+                "Test Granter".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        state.battlefield.push_back(granter);
+        state.add_transient_continuous_effect(
+            granter,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: ObjectId(10) },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Dredge(5),
+            }],
+            None,
+        );
+
+        let registry = build_replacement_registry();
+        let owner_draw = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 1,
+            stage: DrawEventStage::Individual,
+            applied: HashSet::new(),
+        };
+        let candidates = find_applicable_replacements(&state, &owner_draw, &registry);
+
+        let printed_rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+        let granted_rid = granted_dredge_replacement_id(ObjectId(10));
+
+        assert!(
+            candidates.contains(&printed_rid),
+            "printed dredge 2 must remain legal at library size 3 (3 >= 2), \
+             got {candidates:?}"
+        );
+        assert!(
+            !candidates.contains(&granted_rid),
+            "granted dredge 5 must be gated out at library size 3 (3 < 5), \
+             got {candidates:?}"
+        );
+        assert_eq!(
+            candidates.len(),
+            1,
+            "exactly the printed candidate should survive this boundary, \
+             got {candidates:?}"
         );
     }
 

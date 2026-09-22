@@ -46,6 +46,7 @@
 //! - CR 109.4 + CR 108.4a: a graveyard object has no controller; use its owner.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::zones::{add_to_zone, remove_from_zone};
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, DrawReplacementScope, Effect, QuantityExpr,
     ReplacementDefinition, ReplacementMode, TargetFilter,
@@ -430,5 +431,174 @@ fn necrobloom_printed_and_granted_dredge_both_surface_with_distinct_labels() {
         zone_of(&runner, printed),
         Zone::Graveyard,
         "accepting the granted candidate must not consume or duplicate the printed candidate"
+    );
+}
+
+/// CR 121.2a + CR 121.6b: a 2-card draw instruction (two INDIVIDUAL draw
+/// units) with a granted-dredge land in the graveyard — the granted-mechanism
+/// sibling of `multi_draw_dredges_one_of_two_units_other_draws_normally`
+/// (`crates/engine/src/game/replacement.rs`), which covers the identical
+/// per-unit mechanics for PRINTED dredge. Accepting the offer on unit 1
+/// physically returns the land to hand, removing it from the graveyard, so
+/// unit 2 must not re-offer the SAME land (no double-offer of the same land
+/// within one instruction) and its individual draw must proceed normally.
+///
+/// Scope note: a stronger fixture — TWO independently dredgeable GRANTED
+/// lands simultaneously resident in the graveyard for the same draw — was
+/// attempted and hits a genuine, reproducible engine defect unrelated to
+/// either authorized finding: accepting one of two simultaneously
+/// co-applicable GRANTED dredge candidates causes the pipeline to also ask
+/// about the sibling candidate's accept/decline branch, and once both are
+/// decided (in any combination that includes an accept), the entire draw
+/// event is silently swallowed — no draw, no mill, no return; the card is
+/// simply lost. Confirmed NOT to reproduce with two PRINTED dredge
+/// candidates in the identical shape (accepting one completes immediately,
+/// exactly like the single-candidate case) or with one printed + one
+/// granted candidate (the existing
+/// `necrobloom_printed_and_granted_dredge_both_surface_with_distinct_labels`
+/// test below passes), so the defect is specific to 2+ simultaneously live
+/// GRANTED virtual candidates. Fixing it is out of this bounded round's
+/// authorized scope (Finding 1's printed-gate value bug and Finding 2's test
+/// coverage only) and is flagged separately rather than attempted here or
+/// papered over with a test that asserts the broken behavior as correct.
+#[test]
+fn necrobloom_multi_draw_dredges_granted_land_other_draw_proceeds_normally() {
+    let mut scenario = base_scenario();
+    scenario.add_creature_from_oracle(P0, "The Necrobloom", 2, 7, NECROBLOOM_ORACLE);
+    let land = scenario.add_land_to_graveyard(P0, "Forest").id();
+    let mut runner = scenario.build();
+    let hand_before = hand_len(&runner, P0);
+    let library_before = runner.state().players[0].library.len();
+
+    runner.state_mut().debug_mode = true;
+    runner
+        .act(GameAction::Debug(DebugAction::DrawCards {
+            player_id: P0,
+            count: 2,
+        }))
+        .expect("debug draw of 2 must succeed");
+
+    // Unit 1: the granted-dredge land must be offered.
+    let WaitingFor::ReplacementChoice { candidates, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected unit 1's dredge offer to pause on ReplacementChoice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let accept_idx = candidates
+        .iter()
+        .position(|c| c.source_id == land && c.description != "Decline")
+        .expect("the land's accept option must be present for unit 1");
+    runner
+        .act(GameAction::ChooseReplacement { index: accept_idx })
+        .expect("accept unit 1's dredge offer");
+
+    assert_eq!(
+        zone_of(&runner, land),
+        Zone::Hand,
+        "the land must have been dredged back to hand for unit 1"
+    );
+
+    // Unit 2: the land already left the graveyard, so it must not be
+    // re-offered — no dredge-eligible card remains, so the second individual
+    // draw proceeds as an ordinary, unreplaced draw with no separate pause at
+    // all (it completes automatically within the same action, since nothing
+    // needs a player decision) — the discriminating "no double-offer" signal.
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "with no dredge-eligible card left in the graveyard, unit 2 must not \
+         pause on a ReplacementChoice at all, got {:?}",
+        runner.state().waiting_for
+    );
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        hand_len(&runner, P0),
+        hand_before + 2,
+        "hand must increase by exactly 2: the dredged land plus unit 2's normal draw"
+    );
+    assert_eq!(
+        runner.state().players[0].library.len(),
+        library_before - 3,
+        "library must be reduced by exactly 3: 2 milled by unit 1's dredge plus 1 drawn by unit 2"
+    );
+}
+
+/// Hostile fixture: Necrobloom leaves the battlefield (destroyed) AFTER the
+/// granted-dredge `ReplacementChoice` has already been parked but BEFORE the
+/// player submits `GameAction::ChooseReplacement`. This exercises the `None`
+/// degradation paths `apply_single_replacement` / `continue_replacement_impl`
+/// added for a grant that vanishes between registration and the player's
+/// answer: submitting the stale "Accept" index must not panic, must not
+/// fabricate a "Dredge 0" mill-and-return, and must not leave the draw
+/// zeroed with no compensating effect — the event must fall back to
+/// proceeding UNAFFECTED, exactly like a graceful decline.
+#[test]
+fn necrobloom_removed_mid_choice_stale_accept_degrades_to_normal_draw() {
+    let mut scenario = base_scenario();
+    let necrobloom = scenario
+        .add_creature_from_oracle(P0, "The Necrobloom", 2, 7, NECROBLOOM_ORACLE)
+        .id();
+    let land = scenario.add_land_to_graveyard(P0, "Forest").id();
+    let mut runner = scenario.build();
+    let hand_before = hand_len(&runner, P0);
+    let library_before = runner.state().players[0].library.len();
+
+    draw_one(&mut runner, P0);
+    let WaitingFor::ReplacementChoice { candidates, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected the granted-dredge offer to pause before Necrobloom is removed, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let accept_idx = candidates
+        .iter()
+        .position(|c| c.source_id == land && c.description != "Decline")
+        .expect("land's accept option must be present before Necrobloom is removed");
+
+    // Destroy Necrobloom now, with the choice still parked: raw zone move
+    // (mirrors the established `remove_from_zone` + `add_to_zone` + explicit
+    // `.zone` pattern used elsewhere in this crate's integration tests to
+    // simulate an off-pipeline removal) so the grant is gone by the time the
+    // stale "Accept" index is submitted.
+    {
+        let state = runner.state_mut();
+        remove_from_zone(state, necrobloom, Zone::Battlefield, P0);
+        add_to_zone(state, necrobloom, Zone::Graveyard, P0);
+        state.objects.get_mut(&necrobloom).unwrap().zone = Zone::Graveyard;
+    }
+
+    runner
+        .act(GameAction::ChooseReplacement { index: accept_idx })
+        .expect("submitting the stale accept index must not error or panic");
+    runner.advance_until_stack_empty();
+
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "the stale choice must resolve cleanly, not re-park or wedge, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        zone_of(&runner, land),
+        Zone::Graveyard,
+        "with the grant gone, the land must NOT be returned to hand for free"
+    );
+    assert_eq!(
+        hand_len(&runner, P0),
+        hand_before + 1,
+        "the draw must proceed normally (unaffected), not be zeroed and not doubled"
+    );
+    assert_eq!(
+        runner.state().players[0].library.len(),
+        library_before - 1,
+        "exactly 1 card must be drawn from the library — no mill occurred"
     );
 }
