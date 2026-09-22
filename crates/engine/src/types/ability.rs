@@ -6211,6 +6211,16 @@ fn is_default_shared_quality_relation(value: &SharedQualityRelation) -> bool {
 pub enum CombatRelation {
     /// CR 509.1g/509.1h: Candidate is blocking the subject or is blocked by it.
     BlockingOrBlockedBy,
+    /// CR 509.1g + CR 400.7: Candidate is an attacking creature the subject was
+    /// recorded as blocking, within `scope`. Unlike `BlockingOrBlockedBy`, which
+    /// reads live `combat.blocker_to_attacker` and empties when CR 506.4 removes
+    /// either creature from combat, this reads the block-history ledgers
+    /// (`CombatState::creature_blocked_attackers_this_combat` /
+    /// `GameState::creature_blocked_attackers_this_turn`), which CR 506.4 does
+    /// not prune. Each record pins both creatures' exact incarnations, so a
+    /// creature that left and returned matches none of its predecessor's
+    /// records.
+    BlockedBySubject { scope: CombatHistoryScope },
 }
 
 /// Context object for a combat relationship filter.
@@ -9734,16 +9744,41 @@ impl TrackedAnaphorSource {
     }
 }
 
-/// CR 120.9: Grouping key for damage-history aggregation. CR 120.9 distinguishes
-/// damage dealt "by a specific source" from damage in the aggregate, so any
-/// query that needs per-source partitioning before aggregation must select a
-/// key here. Today only `SourceId` is needed; future axes (e.g., per-target)
-/// fit cleanly as additional variants.
+/// Grouping key for damage-history aggregation. Two axes exist: `SourceId`
+/// (CR 120.9 — damage dealt "by a specific source", the per-source reading) and
+/// `Target` (CR 120.1 + CR 120.3 — the recipient axis: damage is dealt to
+/// objects/players and its result is keyed per recipient; the printed phrase
+/// "a player was dealt N or more" is read existentially under CR 608.2c, and
+/// CR 603.4 supplies the intervening-if check timing). Both partition the same
+/// record stream, and the selected `AggregateFunction` is applied across the
+/// per-group sums (`Max` is the existential reading, `Sum` collapses to the
+/// ungrouped total).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DamageGroupKey {
     /// CR 120.9: Group records by `DamageRecord::source_id` so the resolver can
     /// answer "the most damage dealt by any single source."
     SourceId,
+    /// CR 120.1 + CR 120.3: Group records by `DamageRecord::target` — the
+    /// damaged object or player — so the resolver can answer "the most damage
+    /// dealt to any single recipient". This is the existential reading of the
+    /// printed phrase "a player / an opponent was dealt N or more damage this
+    /// turn" (read under CR 608.2c): that clause is true exactly when SOME ONE
+    /// recipient was dealt that much, never when the sum across recipients
+    /// reaches it. CR 603.4 supplies the check timing (at fire and again as the
+    /// intervening-if resolves) for the trigger-borne members of the class.
+    ///
+    /// Mirrors `SourceId`'s partitioning on the recipient axis (the same record
+    /// stream partition, keyed by the other participant; the authority for the
+    /// recipient axis is CR 120.1 + CR 120.3, not CR 120.9, which is
+    /// source-scoped). `Max` over the per-recipient sums is the existential test;
+    /// `Sum` over them equals the ungrouped total, so `Some(Target) + Sum` and
+    /// `None` coincide.
+    ///
+    /// Object recipients that left and returned share an `ObjectId` but are
+    /// different objects (CR 400.7); the current consumers are player-recipient
+    /// thresholds, where the axis is exact. A future per-object-incarnation axis
+    /// belongs to a separate variant.
+    Target,
 }
 
 /// A measurable property of a game object for aggregate queries.
@@ -10443,12 +10478,14 @@ pub enum AttackSubject {
     Source,
 }
 
-/// CR 508.6: The time window over which "attacked [a player]" is measured.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AttackScope {
-    /// Across the whole turn, accumulated over every combat (CR 508.5).
+/// CR 500.8 + CR 511.3: The time window a combat-history predicate is measured over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CombatHistoryScope {
+    /// CR 500.8: the whole turn, accumulated across every combat phase in it —
+    /// effects can add phases to a turn, so a turn is not limited to one combat.
     ThisTurn,
-    /// Within the current combat only (CR 702.121a Melee).
+    /// CR 511.3: the current combat phase only — the window that ends when the
+    /// end of combat step ends.
     ThisCombat,
 }
 
@@ -10518,7 +10555,7 @@ pub enum PlayerFilter {
     /// Destiny), and adds the combat-scoped form used by Melee (CR 702.121a).
     OpponentAttacked {
         subject: AttackSubject,
-        scope: AttackScope,
+        scope: CombatHistoryScope,
     },
     /// CR 508.6 + CR 102.2 + CR 508.1b: The INVERSE combat relation of
     /// `OpponentAttacked` — each opponent of the controller who is *attacking the
@@ -15130,6 +15167,92 @@ impl BounceSelection {
     }
 }
 
+/// CR 115.1a / CR 115.1c / CR 115.1d / CR 115.1e: whether the ATTACHMENT
+/// operand of an [`Effect::Attach`] instruction is a PRINTED TARGET (announced
+/// with the spell/ability, CR 601.2c / CR 602.2b / CR 603.3d) or a DESCRIBED
+/// choice made while the effect resolves (CR 608.2d).
+///
+/// The distinction is per ROLE, not per ability: a mixed instruction can print
+/// "target" for one operand only — `"attach any number of Equipment you control
+/// to target creature you control"` (Beatrix, Loyal General; Ardenn, Intrepid
+/// Archaeologist) announces the creature and chooses the Equipment as the
+/// effect resolves. The HOST operand's timing stays the ability-level
+/// `TargetChoiceTiming`; this field carries the ATTACHMENT operand's.
+///
+/// Determined operands (`SelfRef` / context references — the `Equip {N}`
+/// keyword class) carry `AtResolution { count: One }`: they are not printed
+/// targets, and they claim no announcement slot through the filter-shape
+/// conjunct (`attach_attachment_filter_needs_target_slot`), so the choice here
+/// is behavior-neutral but truthful.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachSelection {
+    /// Default — the printed text names the attachment with "target …", so it is
+    /// announced with the spell or ability (CR 115.1a/c/d/e). Pre-field
+    /// card-data deserializes here, preserving its announcement behavior.
+    #[default]
+    Targeted,
+    /// CR 608.2d: the printed text DESCRIBES the attachment without "target"
+    /// ("an Equipment you control", "any number of Equipment you control",
+    /// "attach this permanent"), so any player choice among the described
+    /// population is made while the effect resolves.
+    AtResolution {
+        #[serde(default, skip_serializing_if = "AttachCardinality::is_one")]
+        count: AttachCardinality,
+    },
+}
+
+impl AttachSelection {
+    /// Helper for `#[serde(skip_serializing_if = ...)]`.
+    pub fn is_targeted(&self) -> bool {
+        matches!(self, Self::Targeted)
+    }
+}
+
+/// CR 107.1c + CR 608.2d: the printed cardinality of a DESCRIBED attachment
+/// operand — how many objects the resolving choice may pick.
+///
+/// `AnyNumber` follows CR 107.1c ("any number" includes zero); `UpTo(N)` is the
+/// "up to N" form; `All` is a DETERMINED set ("attach all Equipment you
+/// control") with NO player choice at all — every matching object attaches.
+/// `All` executes through `effects::attach`'s determined-set path: the prompt
+/// phase short-circuits it (no `EffectZoneChoice`) and the whole live matching
+/// set is bound before the executor's multi-attachment loop runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachCardinality {
+    /// "an <object>" / "a <object>" / a determined operand — exactly one.
+    #[default]
+    One,
+    /// "up to N <objects>" — zero to N.
+    UpTo(QuantityExpr),
+    /// CR 107.1c: "any number of <objects>" — zero or more.
+    AnyNumber,
+    /// "all <objects>" — every matching object (a determined set: no player
+    /// choice; executed by `effects::attach`'s determined-set path, see the
+    /// enum doc).
+    All,
+}
+
+impl AttachCardinality {
+    /// Helper for `#[serde(skip_serializing_if = ...)]`.
+    pub fn is_one(&self) -> bool {
+        matches!(self, Self::One)
+    }
+
+    /// CR 107.1c + CR 608.2d: the target-count bounds this printed cardinality
+    /// imposes on the resolution-time attachment CHOICE. A determined set
+    /// (`All`) never reaches the choice path — `effects::attach`'s prompt phase
+    /// executes it directly — so its arm here is a total-mapping fallback only.
+    pub fn to_multi_target_spec(&self) -> MultiTargetSpec {
+        match self {
+            Self::One | Self::All => MultiTargetSpec::fixed(1, 1),
+            Self::UpTo(max) => MultiTargetSpec::up_to(max.clone()),
+            Self::AnyNumber => MultiTargetSpec::unlimited(0),
+        }
+    }
+}
+
 /// CR 708.2a: Whether a face-down permanent is a creature or a non-creature.
 ///
 /// CR 708.2a sentence 1 gives the manifest/morph default: a face-down permanent
@@ -16353,6 +16476,14 @@ pub enum Effect {
         attachment: TargetFilter,
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
+        /// CR 115.1a/c/d/e + CR 608.2d: when the ATTACHMENT operand is chosen.
+        /// `Targeted` = printed "target …", announced with the ability;
+        /// `AtResolution { count }` = a described choice made while the effect
+        /// resolves. The HOST operand's timing stays the ability-level
+        /// `AbilityDefinition::target_choice_timing`. Defaults to `Targeted` so
+        /// card-data written before this field keeps its announcement behavior.
+        #[serde(default, skip_serializing_if = "AttachSelection::is_targeted")]
+        selection: AttachSelection,
     },
     /// CR 701.3d: Unattach every matching Equipment from a matched host while
     /// leaving that Equipment on the battlefield. `attachment` scopes which
@@ -19111,6 +19242,16 @@ pub enum Effect {
         )]
         player: TargetFilter,
     },
+    /// CR 701.71a: To empower Jace N means "If you don't control a Jace
+    /// planeswalker token, create a blue Jace planeswalker token with 0
+    /// loyalty, '[−1]: Surveil 1,' and '[−3]: Draw a card.' Choose a Jace
+    /// planeswalker token you control. Put N loyalty counters on it."
+    /// The rule fixes the walker, the token and its abilities; N is the only
+    /// open axis.
+    EmpowerJace {
+        /// N: the number of loyalty counters to put on the chosen Jace token.
+        count: QuantityExpr,
+    },
     /// CR 701.37a: Monstrosity N — if not monstrous, put N +1/+1 counters and become monstrous.
     Monstrosity {
         /// Number of +1/+1 counters to place.
@@ -20658,6 +20799,39 @@ impl TargetFilter {
         )
     }
 
+    /// CR 115.10a + CR 608.2d: True when this filter denotes a
+    /// population of BATTLEFIELD OBJECTS — the only population a resolution-time
+    /// battlefield-object choice (`WaitingFor::EffectZoneChoice` with
+    /// `effect_kind: Attach`) can offer. Consumers: the clause-timing classifier
+    /// (`oracle_effect::lower::target_choice_timing_for_clause`, deciding whether a
+    /// printed described-host Attach chooses its host while resolving) and the
+    /// runtime host gate (`effects::attach::prompt_described_host_choice`, the
+    /// independent second guard).
+    ///
+    /// POSITIVE and FAIL-CLOSED, like `names_enumerable_population`: a false
+    /// negative only leaves a clause on its current `Stack` timing (changed
+    /// behaviour requires an explicit opt-in row), while a false positive would
+    /// offer a battlefield prompt for a player- or off-zone-denoting host.
+    pub fn denotes_battlefield_objects(&self) -> bool {
+        self.names_enumerable_population()
+            && !self.denotes_player_target()
+            && self
+                .extract_zones()
+                .iter()
+                .all(|zone| *zone == Zone::Battlefield)
+            && match self {
+                TargetFilter::Typed(tf) => !tf.type_filters.is_empty(),
+                TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                    !filters.is_empty()
+                        && filters
+                            .iter()
+                            .all(TargetFilter::denotes_battlefield_objects)
+                }
+                TargetFilter::Not { filter } => filter.denotes_battlefield_objects(),
+                _ => false,
+            }
+    }
+
     /// CR 608.2c + CR 109.4: If this filter is a player-only reference to the
     /// Nth resolution-chosen player (a type-filter-free `Typed` whose only
     /// distinguishing property is `controller: ChosenPlayer { index }`), return
@@ -21395,6 +21569,7 @@ impl Effect {
             | Effect::AssembleContraptionOnSprocket { .. }
             | Effect::ProcessRadCounters
             | Effect::Incubate { .. }
+            | Effect::EmpowerJace { .. }
             | Effect::Monstrosity { .. }
             | Effect::Specialize
             | Effect::Renown { .. }
@@ -22016,6 +22191,8 @@ impl Effect {
             Effect::Incubate { .. } => false,
             // CR 701.47a: amass creates an Army token and/or adds +1/+1 counters.
             Effect::Amass { .. } => false,
+            // CR 701.71a: empower Jace creates a Jace token and/or adds loyalty counters.
+            Effect::EmpowerJace { .. } => false,
 
             // ---------- Bulk FALSE ----------
             // Everything not named above. These move no card at all, or move cards
@@ -22615,6 +22792,9 @@ impl Effect {
             Effect::Amass { count, .. } => {
                 f(count);
             }
+            Effect::EmpowerJace { count } => {
+                f(count);
+            }
             Effect::Monstrosity { count, .. } => {
                 f(count);
             }
@@ -22857,6 +23037,7 @@ impl Effect {
             | Effect::AdditionalPhase { count, .. }
             | Effect::Incubate { count, .. }
             | Effect::Amass { count, .. }
+            | Effect::EmpowerJace { count }
             | Effect::Monstrosity { count, .. }
             | Effect::Renown { count, .. }
             | Effect::Bolster { count, .. }
@@ -23121,6 +23302,7 @@ impl Effect {
             | Effect::AdditionalPhase { count, .. }
             | Effect::Incubate { count, .. }
             | Effect::Amass { count, .. }
+            | Effect::EmpowerJace { count }
             | Effect::Monstrosity { count, .. }
             | Effect::Renown { count, .. }
             | Effect::Bolster { count, .. }
@@ -23552,6 +23734,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::ChangeTargets { .. } => "ChangeTargets",
         Effect::Incubate { .. } => "Incubate",
         Effect::Amass { .. } => "Amass",
+        Effect::EmpowerJace { .. } => "EmpowerJace",
         Effect::Monstrosity { .. } => "Monstrosity",
         Effect::Specialize => "Specialize",
         Effect::Renown { .. } => "Renown",
@@ -23803,6 +23986,7 @@ pub enum EffectKind {
     ChangeTargets,
     Incubate,
     Amass,
+    EmpowerJace,
     Monstrosity,
     Specialize,
     Renown,
@@ -24092,6 +24276,7 @@ impl From<&Effect> for EffectKind {
             Effect::ChangeTargets { .. } => EffectKind::ChangeTargets,
             Effect::Incubate { .. } => EffectKind::Incubate,
             Effect::Amass { .. } => EffectKind::Amass,
+            Effect::EmpowerJace { .. } => EffectKind::EmpowerJace,
             Effect::Monstrosity { .. } => EffectKind::Monstrosity,
             Effect::Specialize => EffectKind::Specialize,
             Effect::Renown { .. } => EffectKind::Renown,
@@ -38755,6 +38940,100 @@ mod player_target_slot_tests {
             assert!(
                 !filter.denotes_player_target(),
                 "{filter:?} does not name a player-only target slot"
+            );
+        }
+    }
+
+    /// CR 115.10a + CR 608.2d: `denotes_battlefield_objects` is the
+    /// capability boundary shared by the parser's clause-timing classifier and
+    /// the runtime described-host prompt. Every row is a boundary of that
+    /// capability, so a future widening must opt in here explicitly.
+    #[test]
+    fn denotes_battlefield_objects_admits_only_battlefield_object_populations() {
+        let creature_you =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+        let land_you = TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You));
+        let property_only =
+            |props: Vec<FilterProp>| TargetFilter::Typed(TypedFilter::default().properties(props));
+
+        for filter in [
+            // Canonical described host: "a creature you control".
+            creature_you.clone(),
+            // Aura Graft's "another permanent it can enchant" — a type-constrained
+            // object population (CR 115.4 "another").
+            TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::Another])),
+            // Reins of the Vinesteed: the property narrows, it does not name a
+            // player or an off-battlefield zone.
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::CreatureType,
+                    reference: Some(Box::new(TargetFilter::ParentTarget)),
+                    relation: SharedQualityRelation::default(),
+                },
+            ])),
+            // Explicit battlefield zone is admitted.
+            TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::InZone {
+                zone: Zone::Battlefield,
+            }])),
+            // All legs.
+            TargetFilter::Or {
+                filters: vec![creature_you.clone(), land_you],
+            },
+            // Mirrors `names_enumerable_population`'s `Not` arm: over battlefield
+            // objects the complement is still a battlefield population.
+            TargetFilter::Not {
+                filter: Box::new(creature_you.clone()),
+            },
+        ] {
+            assert!(
+                filter.denotes_battlefield_objects(),
+                "{filter:?} denotes a battlefield object population"
+            );
+        }
+
+        for filter in [
+            // Property-only `Typed` — the shape the parser emits for a partially
+            // classified recipient; the non-empty-`type_filters` conjunct refuses
+            // it (a future card that needs it opts in with its own row).
+            property_only(vec![FilterProp::Token]),
+            // Maddening Hex: CR 115.4 "any other" is player-or-object, so a false
+            // positive would offer a battlefield prompt for a random opponent.
+            property_only(vec![FilterProp::Another]),
+            // Spellweaver Volute: off-battlefield zone.
+            TargetFilter::Typed(
+                TypedFilter::default()
+                    .subtype("Instant".to_string())
+                    .properties(vec![
+                        FilterProp::Another,
+                        FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        },
+                    ]),
+            ),
+            // Fail-closed on the property-only leg.
+            TargetFilter::And {
+                filters: vec![
+                    creature_you.clone(),
+                    property_only(vec![FilterProp::Another]),
+                ],
+            },
+            // Zone recursion.
+            TargetFilter::Not {
+                filter: Box::new(TargetFilter::Typed(TypedFilter::creature().properties(
+                    vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }],
+                ))),
+            },
+            // Sweep shapes / anaphors / players / contentless.
+            TargetFilter::Any,
+            TargetFilter::SelfRef,
+            TargetFilter::Player,
+            TargetFilter::Typed(TypedFilter::default()),
+        ] {
+            assert!(
+                !filter.denotes_battlefield_objects(),
+                "{filter:?} does not denote a battlefield object population"
             );
         }
     }

@@ -14,6 +14,9 @@ set -euo pipefail
 # are all baked-in defaults, so the token is all that's required):
 #   /etc/phase-card-bot.env  →  CARD_BOT_TOKEN   (secret, from the Discord portal)
 #
+# /lfg state persists across redeploys in the named volume phase-card-bot-data,
+# mounted at /data (the image's CARD_BOT_DB_PATH is /data/lfg.sqlite).
+#
 # Usage: ./deploy/card-bot-push.sh        (HOST defaults to the phase-vps ssh alias)
 
 HOST="${CARD_BOT_HOST:-phase-vps}"
@@ -31,6 +34,13 @@ if [ "${healthy:-0}" != "1" ]; then
   $D logs --tail 50 phase-card-bot || true
   exit 1
 fi'
+
+cd "$(dirname "$0")/.."
+
+# The seam pins (formats, endpoints, server directory) guard what the image
+# ships; a failure aborts before anything is built (set -e).
+echo "Testing card-bot..."
+bun test scripts/card-bot
 
 echo "Building ${IMAGE}..."
 # --platform linux/amd64: the VPS is x86_64 even when building from Apple Silicon.
@@ -50,11 +60,12 @@ ssh "${HOST}" "${detect} \
     --name phase-card-bot \
     --restart unless-stopped \
     -p 127.0.0.1:9375:9375 \
+    -v phase-card-bot-data:/data \
     ${IMAGE} \
   && echo 'Waiting for health...' \
   && ${wait_for_health_remote} \
   && \$D ps --filter name=phase-card-bot --filter status=running"
 
 echo "Done — phase-card-bot deployed to ${HOST}"
-echo "If the /card command shape changed, register it once with:"
+echo "If a command shape changed (/card or /lfg), register once with:"
 echo "  ssh ${HOST} \"${detect} \\\$D run --rm --env-file ${ENV_FILE} ${IMAGE} bun run card-bot/register.ts\""
