@@ -3170,11 +3170,13 @@ pub(crate) fn dredge_replacement_definition(n: u32) -> ReplacementDefinition {
         .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
         .active_zones(vec![Zone::Graveyard]);
     replacement.mode = crate::types::ability::ReplacementMode::Optional { decline: None };
-    replacement.description = Some(
-        "CR 702.52a: Dredge — instead of drawing, you may mill N cards and return this \
+    // CR 616.1: a printed and a differently-valued GRANTED dredge candidate can
+    // co-occur on one card in a single ordering prompt, so this label must show
+    // its own N (the granted label interpolates its own value the same way).
+    replacement.description = Some(format!(
+        "CR 702.52a: Dredge — instead of drawing, you may mill {n} cards and return this \
          card from your graveyard to your hand."
-            .to_string(),
-    );
+    ));
     replacement.execute = Some(Box::new(mill));
     replacement
 }

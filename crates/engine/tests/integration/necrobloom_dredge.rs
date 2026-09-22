@@ -180,11 +180,10 @@ fn printed_dredge_replacement(n: u32) -> ReplacementDefinition {
         .draw_scope(DrawReplacementScope::IndividualDraw)
         .active_zones(vec![Zone::Graveyard]);
     repl.mode = ReplacementMode::Optional { decline: None };
-    repl.description = Some(
-        "CR 702.52a: Dredge — instead of drawing, you may mill N cards and return this \
+    repl.description = Some(format!(
+        "CR 702.52a: Dredge — instead of drawing, you may mill {n} cards and return this \
          card from your graveyard to your hand."
-            .to_string(),
-    );
+    ));
     repl.execute = Some(Box::new(mill));
     repl
 }

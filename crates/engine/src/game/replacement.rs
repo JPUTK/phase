@@ -1648,11 +1648,10 @@ fn replacement_choice_label_for_rid(state: &GameState, rid: ReplacementId) -> St
         // `ReplacementDefinition` to read a description from (see
         // `granted_dredge_value`), so this label is built directly from the
         // resolved value, interpolating the OBJECT'S OWN effective (granted)
-        // N — unlike printed dredge's static `repl.description`
-        // (`database::synthesis::dredge_replacement_definition`), which does
-        // NOT itself interpolate its N (it reads the literal word "N"), so two
-        // dredge candidates with different granted values still read
-        // distinctly in a CR 616.1 ordering prompt.
+        // N — matching printed dredge's `repl.description`
+        // (`database::synthesis::dredge_replacement_definition`), which
+        // interpolates its own N too, so two dredge candidates with different
+        // values still read distinctly in a CR 616.1 ordering prompt.
         //
         // `None` means the grant vanished between registration and this
         // display read (e.g. the granting effect ended) — a display-only
@@ -8177,6 +8176,18 @@ pub fn find_applicable_replacements(
     // single printed instance of the kind, as every real card has). Either way
     // the loop would have `continue`d, so the guard changes cost, never
     // behavior.
+    //
+    // Cost when a Dredge grant IS live: one hoisted sweep plus
+    // `granted_dredge_value`'s per-card off-zone resolve, which MATCHES the
+    // engine-wide off-zone keyword cost model rather than being inherent to
+    // this block — the same per-recipient `effective_off_zone_keywords` resolve
+    // is paid, unguarded, by keyword-predicate filter evaluation (`filter.rs`),
+    // off-zone casting/activation enumeration (`casting.rs`), and off-zone
+    // trigger reconciliation (`triggers.rs`). A cross-cutting change that lets
+    // the off-zone authority accept a pre-collected shared effect list would
+    // lower all of those together and is the right home for removing the
+    // per-card term here; it is deliberately not special-cased for this one
+    // consumer.
     //
     // Once resolved, `granted_dredge_value` compares the effective value
     // against any printed Dredge on the same object and returns `None` only
