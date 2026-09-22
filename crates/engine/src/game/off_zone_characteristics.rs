@@ -387,8 +387,20 @@ fn modification_can_add_keyword_kind(
         | ContinuousModification::RemoveAllAbilities => false,
         // Unreachable under the `supports_off_zone_keyword_query` conjunct in
         // `effect_can_add_off_zone_keyword_kind`; present only because
-        // `ContinuousModification` has many non-keyword arms.
-        _ => false,
+        // `ContinuousModification` has many non-keyword arms. The assertion is
+        // what turns silent drift into a test-time failure: a new
+        // keyword-ADDING arm admitted by `supports_off_zone_keyword_query` but
+        // left unclassified above would land here, make the hoisted guard
+        // answer `false`, and silently stop offering granted dredge.
+        _ => {
+            debug_assert!(
+                !supports_off_zone_keyword_query(&effect.modification),
+                "a modification admitted by `supports_off_zone_keyword_query` must be \
+                 classified explicitly above: {:?}",
+                effect.modification
+            );
+            false
+        }
     }
 }
 

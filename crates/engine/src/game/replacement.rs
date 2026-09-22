@@ -406,6 +406,16 @@ fn printed_dredge_value(obj: &GameObject) -> Option<u32> {
 /// REDUNDANCY test, never by itself a reason to suppress the granted
 /// candidate.
 ///
+/// Known limitation: two Dredge grants SIMULTANEOUSLY active on one graveyard
+/// card with DIFFERENT values collapse to a single virtual candidate.
+/// `effective_dredge_value` resolves one value — `upsert_keyword_contribution`
+/// (`off_zone_characteristics.rs`) replaces a same-kind contribution, since
+/// `Keyword::Dredge` is not in `instances_must_coexist` (`types/keywords.rs`) —
+/// and this family reserves one `GRANTED_DREDGE_INDEX` per object, so only the
+/// last-applied grant is offered. Unreachable today: The Necrobloom is the only
+/// shipped source that grants Dredge; a second differently-valued granter would
+/// need per-contribution candidate keying, not built speculatively.
+///
 /// The cheap zone check on the already-fetched `obj` gates the expensive
 /// `effective_dredge_value` resolve (a whole-game off-zone continuous-effect
 /// sweep, `off_zone_characteristics::effective_off_zone_keyword_contributions`).
