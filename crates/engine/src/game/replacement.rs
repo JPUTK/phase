@@ -8151,11 +8151,52 @@ pub fn find_applicable_replacements(
         ..
     } = event
     {
-        if let Some(player) = state.players.iter().find(|p| p.id == *player_id) {
+        // A missing `ReplacementEvent::Draw` handler means the engine cannot apply
+        // a Draw replacement at all, so this family offers nothing — mirroring
+        // `object_replacement_candidate_applies`'s
+        // `let Some(handler) = registry.get(..) else { return false };`. This
+        // `else` is scoped to THIS block only: the object-carried scan and the
+        // state-level scan below perform their own handler lookups and must not be
+        // short-circuited by this one.
+        if let (Some(draw_handler), Some(player)) = (
+            registry.get(&ReplacementEvent::Draw),
+            state.players.iter().find(|p| p.id == *player_id),
+        ) {
             let library_size = player.library.len() as u32;
             for object_id in player.graveyard.iter().copied() {
                 let rid = granted_dredge_replacement_id(object_id);
                 if event.already_applied(&rid) {
+                    continue;
+                }
+                // CR 616.1f: the CR 616.1 repetition takes "into account only
+                // replacement or prevention effects that would now be
+                // applicable", and CR 614.6: a replaced event never happens.
+                // The registry's `ReplacementEvent::Draw` matcher (`draw_matcher`:
+                // `count > 0`) is this engine's single authority for "is there
+                // still a draw here to replace", and BOTH other candidate sources
+                // consult it — the object-carried scan via
+                // `object_replacement_candidate_applies` and the state-level scan
+                // before its own `candidates.push`. This virtual family must pass
+                // through the SAME gate or the paths disagree: once an accepted
+                // dredge has substituted the draw away — `apply_granted_dredge_replacement`
+                // zeroes the count, exactly as `apply_single_replacement` pre-zeroes
+                // it for the printed path when `draw_is_substituted_away` classifies
+                // the accept as a substitution — no further dredge is applicable
+                // to it. Without this gate the CR 616.1f re-scan re-offered every
+                // OTHER granted-dredge graveyard card against the dead draw, and
+                // answering that stray prompt either abandoned the accepted
+                // dredge's post-replacement continuation (decline: no draw, no
+                // mill, no return) or overwrote it with the sibling's (accept: the
+                // chosen card lost, the sibling dredged) — both CR 614.5
+                // violations.
+                //
+                // Called PER CANDIDATE with that candidate's own source, exactly as
+                // the two sibling scans call it with `obj.id` / `source_host` (see
+                // the parity rule stated on the state-level scan). It is a
+                // `matches!` on the event — far cheaper than `granted_dredge_value`'s
+                // off-zone continuous-effect sweep below — so the block's
+                // cheap-before-expensive ordering is preserved.
+                if !(draw_handler.matcher)(event, object_id, state) {
                     continue;
                 }
                 let Some(dredge) = granted_dredge_value(state, object_id) else {
@@ -11326,6 +11367,22 @@ fn continue_replacement_impl(
         // path has always OVERWRITTEN a resident continuation rather than
         // discarding the incoming one. The two policies genuinely disagree; both
         // are preserved exactly here, and naming them is the point.
+        //
+        // Open question (deferred, NOT resolved here): on a DECLINE this path's
+        // sibling arm (`None => abandon_active_post_replacement_drains`) drops a
+        // resident continuation installed by an earlier accepted candidate. For
+        // an accepted DREDGE this is now unreachable: the accept zeroes the
+        // draw's count (`apply_granted_dredge_replacement` / the printed path's
+        // `draw_is_substituted_away`) and the registration gate in
+        // `find_applicable_replacements`'s granted-dredge block (CR 616.1f /
+        // CR 614.6) then stops any sibling from being re-offered. It is NOT
+        // closed in general — not even for Draw: `draw_is_substituted_away`
+        // classifies a rescaled or same-player `Effect::Draw` accept as a
+        // SURVIVING draw while this path still installs its continuation, so a
+        // non-dredge optional Draw replacement can leave `count > 0` with a
+        // drain resident and a legitimately co-applicable sibling (CR 616.1f).
+        // That shape, and any event family whose applier MODIFIES rather than
+        // annihilates its event, is unmeasured; see the PR's follow-up note.
         //
         // CR 615.5 + CR 609.7: an optional/decline post-effect carries no
         // prevention-event-source semantics, so `event_source`/`event_target` are
@@ -15692,6 +15749,103 @@ mod tests {
             1,
             "exactly the printed candidate should survive this boundary, \
              got {candidates:?}"
+        );
+    }
+
+    /// CR 614.6 + CR 616.1f: once an accepted dredge has substituted the draw
+    /// away, the draw "never happens", so the CR 616.1 repetition may consider
+    /// only effects that "would now be applicable" — and no dredge is
+    /// applicable to a `count: 0` draw. The granted-dredge registration block
+    /// must therefore consult the registry's `ReplacementEvent::Draw` matcher
+    /// (`draw_matcher`: `count > 0`) exactly as the object-carried and
+    /// state-level scans do.
+    ///
+    /// The fixture carries TWO granted-only graveyard cards on purpose: with a
+    /// single card the empty-candidate assertion would be satisfied by the CR
+    /// 614.5 `already_applied` guard alone once that card had been accepted,
+    /// so a one-card fixture proves nothing about the event-payload gate.
+    #[test]
+    fn granted_dredge_not_offered_once_the_draw_is_substituted_away() {
+        let mut state = dredge_state(10);
+
+        // Two granted-ONLY graveyard cards (no printed `Keyword::Dredge`).
+        // `granted_dredge_value` starts from `state.objects.get(&object_id)?`
+        // and then gates on `obj.zone != Zone::Graveyard`, so each card must be
+        // inserted into `state.objects` as well as pushed into the player's
+        // graveyard — mirroring `dredge_state`'s own create-and-insert pattern.
+        let granted_a = ObjectId(50);
+        let granted_b = ObjectId(51);
+        for (id, name) in [(granted_a, "Granted Land A"), (granted_b, "Granted Land B")] {
+            state.objects.insert(
+                id,
+                GameObject::new(
+                    id,
+                    CardId(id.0),
+                    PlayerId(0),
+                    name.to_string(),
+                    Zone::Graveyard,
+                ),
+            );
+            state.players[0].graveyard.push_back(id);
+        }
+
+        let granter = ObjectId(99);
+        state.objects.insert(
+            granter,
+            GameObject::new(
+                granter,
+                CardId(99),
+                PlayerId(0),
+                "Test Granter".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        state.battlefield.push_back(granter);
+        for id in [granted_a, granted_b] {
+            state.add_transient_continuous_effect(
+                granter,
+                PlayerId(0),
+                Duration::UntilEndOfTurn,
+                TargetFilter::SpecificObject { id },
+                vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Dredge(2),
+                }],
+                None,
+            );
+        }
+
+        let registry = build_replacement_registry();
+
+        // Positive reach-guard FIRST: on a live draw both granted candidates
+        // are registered, so the fixture demonstrably reaches the block's
+        // `candidates.push` for two distinct sources.
+        let live_draw = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 1,
+            stage: DrawEventStage::Individual,
+            applied: HashSet::new(),
+        };
+        let live_candidates = find_applicable_replacements(&state, &live_draw, &registry);
+        assert!(
+            live_candidates.contains(&granted_dredge_replacement_id(granted_a))
+                && live_candidates.contains(&granted_dredge_replacement_id(granted_b)),
+            "fixture precondition: both granted-dredge cards must be offered \
+             against a live (count 1) draw, got {live_candidates:?}"
+        );
+
+        // CR 614.6: the identical board, with the draw already substituted
+        // away, must offer nothing at all.
+        let spent_draw = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 0,
+            stage: DrawEventStage::Individual,
+            applied: HashSet::new(),
+        };
+        let spent_candidates = find_applicable_replacements(&state, &spent_draw, &registry);
+        assert!(
+            spent_candidates.is_empty(),
+            "CR 614.6 + CR 616.1f: a draw that was replaced never happens, so no \
+             dredge candidate may be registered against it, got {spent_candidates:?}"
         );
     }
 
