@@ -3091,6 +3091,24 @@ pub fn synthesize_dredge(face: &mut CardFace) {
         return;
     }
 
+    face.replacements.push(dredge_replacement_definition(n));
+}
+
+/// CR 702.52a + CR 121.6b + CR 113.6b: the single per-value Dredge Draw
+/// replacement definition — "if you would draw a card, you may instead mill N
+/// cards and return this card from your graveyard to your hand."
+///
+/// The single authority for building a Dredge replacement, shared by:
+/// - build-time synthesis (`synthesize_dredge`) for PRINTED Dredge, and
+/// - the runtime granted-keyword replacement path (`granted_dredge_value` →
+///   `find_applicable_replacements` in `game/replacement.rs`), which surfaces
+///   one virtual candidate for a graveyard card whose Dredge is granted at
+///   runtime (e.g. The Necrobloom's "Land cards in your graveyard have dredge
+///   2") rather than printed.
+///
+/// Because both callers build identical definitions, printed + granted
+/// instances each apply through the same shape.
+pub(crate) fn dredge_replacement_definition(n: u32) -> ReplacementDefinition {
     // CR 702.52a: "return this card from your graveyard to your hand."
     let return_to_hand = AbilityDefinition::new(
         AbilityKind::Spell,
@@ -3139,7 +3157,7 @@ pub fn synthesize_dredge(face: &mut CardFace) {
             .to_string(),
     );
     replacement.execute = Some(Box::new(mill));
-    face.replacements.push(replacement);
+    replacement
 }
 
 /// Idempotency-shape predicate for the synthesized Dredge draw-replacement — a
