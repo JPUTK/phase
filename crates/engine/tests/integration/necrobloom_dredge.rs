@@ -22,7 +22,10 @@
 //!
 //! Candidate MULTIPLICITY — two or more candidates produced by one grant for a
 //! single draw — is a first-class coverage axis of this module, not an edge
-//! case: the grant's subject ("Land cards in your graveyard") is plural.
+//! case: the grant's subject ("Land cards in your graveyard") is plural. It is
+//! covered both ACROSS objects (several graveyard cards claiming one draw) and
+//! ON A SINGLE OBJECT (one land carrying a printed Dredge alongside the granted
+//! one — the board `granted_dredge_value`'s redundancy comparison exists for).
 //!
 //! These tests drive the real engine pipeline (`GameScenario` + `GameRunner`,
 //! `DebugAction::DrawCards` → the real `start_draw_sequence` replacement pipeline,
@@ -453,6 +456,272 @@ fn necrobloom_printed_and_granted_dredge_both_surface_with_distinct_labels() {
         zone_of(&runner, printed),
         Zone::Graveyard,
         "accepting the granted candidate must not consume or duplicate the printed candidate"
+    );
+}
+
+/// Matrix row 4 — the SAME-OBJECT completion of the row above, on the shape
+/// `granted_dredge_value`'s redundancy comparison actually exists for: one
+/// LAND that both prints Dredge 2 (Dakmor Salvage) and receives Necrobloom's
+/// granted dredge 2. Necrobloom's filter is "Land cards in your graveyard", so
+/// a creature — which is what every landed printed+granted row uses — can never
+/// reach this board.
+///
+/// CR 702.52a: the two values coincide, so the granted candidate is redundant
+/// with the object-carried one and must NOT register a second time; exactly ONE
+/// candidate is offered, as a solo optional Accept/Decline prompt rather than a
+/// CR 616.1 ordering prompt carrying two per-candidate labels. Reverting
+/// `granted_dredge_value`'s redundancy branch turns this row red with two
+/// candidates — that branch is the code under test here.
+#[test]
+fn necrobloom_land_with_identical_printed_dredge_offers_one_candidate() {
+    let mut scenario = base_scenario();
+    scenario.add_creature_from_oracle(P0, "The Necrobloom", 2, 7, NECROBLOOM_ORACLE);
+    let dakmor = scenario
+        .add_land_to_graveyard(P0, "Dakmor Salvage")
+        .with_keyword(Keyword::Dredge(2))
+        .with_replacement_definition(printed_dredge_replacement(2))
+        .id();
+    let mut runner = scenario.build();
+    let hand_before = hand_len(&runner, P0);
+    let library_before = runner.state().players[0].library.len();
+
+    draw_one(&mut runner, P0);
+
+    // Reach-guard: the board really offers something, and it is really
+    // attributed to the land — "exactly one candidate" cannot pass vacuously on
+    // a board that offered nothing.
+    let prompt = replacement_prompt(&runner).unwrap_or_else(|| {
+        panic!(
+            "expected the land's dredge offer, got {:?}",
+            runner.state().waiting_for
+        )
+    });
+    assert!(
+        prompt.iter().all(|(source, _)| *source == dakmor),
+        "every option must be attributed to the one graveyard land, got {prompt:?}"
+    );
+    let descriptions: Vec<&str> = prompt.iter().map(|(_, d)| d.as_str()).collect();
+    assert_eq!(
+        descriptions,
+        vec!["Accept", "Decline"],
+        "CR 702.52a: a granted dredge 2 identical to the printed dredge 2 must \
+         collapse to the single object-carried candidate — a solo optional \
+         prompt, not a two-label CR 616.1 ordering prompt, got {prompt:?}"
+    );
+
+    let accept = prompt
+        .iter()
+        .position(|(_, description)| description == "Accept")
+        .unwrap_or_else(|| panic!("an Accept option must be offered, got {prompt:?}"));
+    runner
+        .act(GameAction::ChooseReplacement { index: accept })
+        .expect("accept the land's dredge offer");
+    let leftover = replacement_prompt(&runner);
+    assert!(
+        leftover.is_none(),
+        "CR 614.6 + CR 616.1f: nothing may be re-offered against the replaced draw, \
+         got {leftover:?}"
+    );
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        zone_of(&runner, dakmor),
+        Zone::Hand,
+        "CR 702.52a: the accepted dredge must return THIS card to hand"
+    );
+    assert_eq!(
+        runner.state().players[0].library.len(),
+        library_before - 2,
+        "exactly 2 cards must be milled (dredge 2)"
+    );
+    assert_eq!(
+        hand_len(&runner, P0),
+        hand_before + 1,
+        "CR 614.6: the draw was replaced, so hand grows by exactly 1"
+    );
+}
+
+/// Matrix row 5 — the same land with a DIFFERING printed value (dredge 3 printed,
+/// dredge 2 granted). The two are distinct instances of the ability, so both
+/// must surface from ONE object: a real CR 616.1 ordering prompt with two
+/// distinguishable labels, both attributed to the same `source_id`. Accepting
+/// the granted one returns the land exactly once and mills the GRANTED count.
+///
+/// `base_scenario`'s 3-card library is exactly dredge 3's CR 702.52b threshold,
+/// so both candidates are legal on this board.
+#[test]
+fn necrobloom_land_with_differing_printed_dredge_offers_both_candidates() {
+    let mut scenario = base_scenario();
+    scenario.add_creature_from_oracle(P0, "The Necrobloom", 2, 7, NECROBLOOM_ORACLE);
+    let dakmor = scenario
+        .add_land_to_graveyard(P0, "Dakmor Salvage")
+        .with_keyword(Keyword::Dredge(3))
+        .with_replacement_definition(printed_dredge_replacement(3))
+        .id();
+    let mut runner = scenario.build();
+    let hand_before = hand_len(&runner, P0);
+    let library_before = runner.state().players[0].library.len();
+
+    draw_one(&mut runner, P0);
+
+    let prompt = replacement_prompt(&runner).unwrap_or_else(|| {
+        panic!(
+            "expected a CR 616.1 ordering prompt with both same-object candidates, got {:?}",
+            runner.state().waiting_for
+        )
+    });
+    // Reach-guard: both candidates are present, both on ONE object, before
+    // either accept — so neither accept direction can pass by picking the other.
+    assert_eq!(
+        prompt.len(),
+        2,
+        "CR 616.1: a printed dredge 3 and a granted dredge 2 on one object are two \
+         distinct instances and must both surface, got {prompt:?}"
+    );
+    assert!(
+        prompt.iter().all(|(source, _)| *source == dakmor),
+        "both candidates must be attributed to the same land, got {prompt:?}"
+    );
+    let granted_idx = prompt
+        .iter()
+        .position(|(_, description)| description.contains("Dredge 2"))
+        .unwrap_or_else(|| {
+            panic!("the granted candidate must interpolate its OWN value, got {prompt:?}")
+        });
+    assert!(
+        prompt
+            .iter()
+            .any(|(_, description)| description.starts_with("CR 702.52a")),
+        "the object-carried printed candidate must keep its synthesized label, got {prompt:?}"
+    );
+    assert_ne!(
+        prompt[0].1, prompt[1].1,
+        "the two same-object candidates must read distinctly in the ordering prompt"
+    );
+    assert!(
+        prompt
+            .iter()
+            .all(|(_, description)| description != "Replacement effect"),
+        "neither candidate may fall through to the generic placeholder label, got {prompt:?}"
+    );
+
+    runner
+        .act(GameAction::ChooseReplacement { index: granted_idx })
+        .expect("order-pick the granted candidate");
+    let accept_prompt = replacement_prompt(&runner).unwrap_or_else(|| {
+        panic!(
+            "expected the Accept/Decline prompt for the chosen granted candidate, got {:?}",
+            runner.state().waiting_for
+        )
+    });
+    let accept = accept_prompt
+        .iter()
+        .position(|(_, description)| description != "Decline")
+        .unwrap_or_else(|| panic!("an accept option must be offered, got {accept_prompt:?}"));
+    runner
+        .act(GameAction::ChooseReplacement { index: accept })
+        .expect("accept the granted candidate");
+    let leftover = replacement_prompt(&runner);
+    assert!(
+        leftover.is_none(),
+        "CR 614.6 + CR 616.1f: the printed sibling on the same object may not be \
+         re-offered against the replaced draw, got {leftover:?}"
+    );
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        zone_of(&runner, dakmor),
+        Zone::Hand,
+        "CR 702.52a: the land must return to hand"
+    );
+    assert_eq!(
+        hand_len(&runner, P0),
+        hand_before + 1,
+        "the land must reach hand exactly ONCE — never +2 from both instances"
+    );
+    assert_eq!(
+        runner.state().players[0].library.len(),
+        library_before - 2,
+        "the GRANTED candidate's own count (2) must be milled, not the printed 3"
+    );
+}
+
+/// Matrix row 5, the other accept direction: picking the PRINTED candidate on
+/// the same object mills its own count (3) and still returns the land exactly
+/// once. Pairing both directions is what proves the choice is real rather than
+/// one candidate silently standing in for the other.
+#[test]
+fn necrobloom_land_with_differing_printed_dredge_accepting_the_printed_one_returns_it_once() {
+    let mut scenario = base_scenario();
+    scenario.add_creature_from_oracle(P0, "The Necrobloom", 2, 7, NECROBLOOM_ORACLE);
+    let dakmor = scenario
+        .add_land_to_graveyard(P0, "Dakmor Salvage")
+        .with_keyword(Keyword::Dredge(3))
+        .with_replacement_definition(printed_dredge_replacement(3))
+        .id();
+    let mut runner = scenario.build();
+    let hand_before = hand_len(&runner, P0);
+    let library_before = runner.state().players[0].library.len();
+
+    draw_one(&mut runner, P0);
+
+    let prompt = replacement_prompt(&runner).unwrap_or_else(|| {
+        panic!(
+            "expected a CR 616.1 ordering prompt with both same-object candidates, got {:?}",
+            runner.state().waiting_for
+        )
+    });
+    assert_eq!(
+        prompt.len(),
+        2,
+        "reach-guard: both same-object candidates must be present before the \
+         printed one is picked, got {prompt:?}"
+    );
+    let printed_idx = prompt
+        .iter()
+        .position(|(_, description)| description.starts_with("CR 702.52a"))
+        .unwrap_or_else(|| {
+            panic!("the object-carried printed candidate must be present, got {prompt:?}")
+        });
+
+    runner
+        .act(GameAction::ChooseReplacement { index: printed_idx })
+        .expect("order-pick the printed candidate");
+    let accept_prompt = replacement_prompt(&runner).unwrap_or_else(|| {
+        panic!(
+            "expected the Accept/Decline prompt for the chosen printed candidate, got {:?}",
+            runner.state().waiting_for
+        )
+    });
+    let accept = accept_prompt
+        .iter()
+        .position(|(_, description)| description != "Decline")
+        .unwrap_or_else(|| panic!("an accept option must be offered, got {accept_prompt:?}"));
+    runner
+        .act(GameAction::ChooseReplacement { index: accept })
+        .expect("accept the printed candidate");
+    let leftover = replacement_prompt(&runner);
+    assert!(
+        leftover.is_none(),
+        "CR 614.6 + CR 616.1f: the granted sibling on the same object may not be \
+         re-offered against the replaced draw, got {leftover:?}"
+    );
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        zone_of(&runner, dakmor),
+        Zone::Hand,
+        "CR 702.52a: the land must return to hand"
+    );
+    assert_eq!(
+        hand_len(&runner, P0),
+        hand_before + 1,
+        "the land must reach hand exactly ONCE — never +2 from both instances"
+    );
+    assert_eq!(
+        runner.state().players[0].library.len(),
+        library_before - 3,
+        "CR 702.52b: the PRINTED candidate's own count (3) must be milled, not the granted 2"
     );
 }
 
