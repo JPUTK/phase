@@ -29,6 +29,7 @@ use super::oracle_nom::condition::{
     parse_inner_condition, parse_spell_history_filter, parse_there_are_battlefield_count_clause,
 };
 use super::oracle_nom::condition::{parse_source_counters_exist, parse_source_has_counters};
+use super::oracle_nom::duration::parse_self_reference_subject;
 use super::oracle_nom::error::{oracle_err, OracleResult};
 use super::oracle_nom::filter::{
     parse_color_property, parse_enters_origin_zone, parse_property_filter, parse_with_property,
@@ -11230,23 +11231,20 @@ fn strip_while_state_clause(condition: &str) -> Option<(String, WhileStateGate)>
 /// templating, so the widened lexicon is a strict superset — no existing head
 /// changes meaning.
 ///
-/// The self-reference token is spelled as the GRAMMAR ("`~`", or "this
-/// ⟨word⟩") rather than as a copy of `oracle_util::SELF_REF_TYPE_PHRASES`,
-/// which would drift from that constant. `~` is the live production path
-/// (`normalize_card_name_refs` runs upstream of both consumers); the
-/// `this ⟨word⟩` arm is the robustness arm for direct callers such as
-/// `parse_trigger_line`. Admitting a slightly wider subject set costs nothing —
-/// the discriminating token is `" transforms into "`, and only a permanent can
-/// transform.
+/// The self-reference token reuses [`parse_self_reference_subject`]
+/// (`oracle_nom::duration`), the single authority for source self-references —
+/// `~` (the live production path; `normalize_card_name_refs` runs upstream of
+/// both consumers) plus every `oracle_util::SELF_REF_TYPE_PHRASES` phrase
+/// ("this creature", "this permanent", …), which covers the direct callers
+/// such as `parse_trigger_line` that never normalise to `~`. Admitting that
+/// closed subject set costs nothing — the discriminating token is
+/// `" transforms into "`, and only a permanent can transform.
 pub(crate) fn parse_as_transforms_into_keyword(i: &str) -> OracleResult<'_, ()> {
     value(
         (),
         terminated(
             tag("as "),
-            peek((
-                alt((tag("~"), recognize(preceded(tag("this "), alpha1)))),
-                tag(" transforms into "),
-            )),
+            peek((parse_self_reference_subject, tag(" transforms into "))),
         ),
     )
     .parse(i)

@@ -314,8 +314,18 @@ pub(crate) fn parse_except_body<'a>(
 /// CR 707.9a: "except … and has defender" — keyword grant without the "it has "
 /// subject (Wall of Stolen Identity). Distinct from [`parse_it_has_keywords`],
 /// which requires the explicit "it has " anaphor.
+///
+/// The plural agreement "have" (Gut, Zealous Fanatic: "except they're 2/2 and
+/// have haste") is the same subject-less continuation one number over: once
+/// [`parse_theyre_pt_and_types`] declines a bare P/T plural body and
+/// [`parse_subject_pt_only`] claims the P/T override, the trailing " and have
+/// haste" conjunct re-enters this dispatch chain with the plural subject
+/// ("they") already consumed by the prior body — exactly the shape this arm
+/// exists for, just with "have" instead of "has".
 fn parse_has_keywords(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("has ").parse(input).ok()?;
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("has "), tag("have ")))
+        .parse(input)
+        .ok()?;
     let (kw_text, remainder) = split_at_body_boundary(rest);
     let mut modifications = Vec::new();
     for part in split_keyword_list(kw_text) {
@@ -591,10 +601,16 @@ fn parse_rounding_sentence(input: &str) -> Option<(&str, RoundingMode)> {
 /// whether color and/or creature subtypes REPLACE the copied values (no carve-out)
 /// or are ADDED. The "in addition to its other types" carve-out covers ONLY card
 /// type/supertype/subtype — color is NOT carved out, so color still replaces there.
+///
+/// No variant represents a "colors"-only carve-out (a carve-out that adds
+/// color but still replaces creature subtypes) — [`split_in_addition_tail`],
+/// the single authority for the CR 205.1b marker all three carve-out sites
+/// delegate to, only ever matches a marker ending in "types", so that
+/// carve-out has no marker representation and no corpus card pairs it with
+/// an `<subject> is a N/M …` head.
 enum AdditiveSuffix {
     None,
     Types,
-    Colors,
     ColorsAndTypes,
 }
 
@@ -626,39 +642,34 @@ fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModifi
     let (rest, (power, toughness)) = parse_pt_pair(rest)?;
     let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest).ok()?;
 
-    // Recognise the type list and which carve-out (if any) follows it. Try the
-    // carve-out variants longest-first so "colors and types" is not consumed as
-    // the shorter "colors" tail. First `Some` wins.
-    let (type_text, rest, suffix) = if let Some((type_text, rest)) = split_on_first_of(
-        rest,
-        &[
-            " in addition to its other colors and types",
-            " in addition to his other colors and types",
-            " in addition to her other colors and types",
-        ],
-    ) {
-        (type_text, rest, AdditiveSuffix::ColorsAndTypes)
-    } else if let Some((type_text, rest)) = split_on_first_of(
-        rest,
-        &[
-            " in addition to its other colors",
-            " in addition to his other colors",
-            " in addition to her other colors",
-        ],
-    ) {
-        (type_text, rest, AdditiveSuffix::Colors)
-    } else if let Some((type_text, rest)) = split_on_first_of(
-        rest,
-        &[
-            " in addition to its other types",
-            " in addition to his other types",
-            " in addition to her other types",
-        ],
-    ) {
-        (type_text, rest, AdditiveSuffix::Types)
-    } else {
-        let (type_text, rest) = split_at_body_boundary(rest);
-        (type_text, rest, AdditiveSuffix::None)
+    // CR 205.1b: recognise the type list and which carve-out (if any) follows
+    // it through the shared `split_in_addition_tail` marker (`animation.rs`)
+    // — the single authority [`parse_theyre_pt_and_types`] (the plural
+    // sibling) already delegates to — instead of a third bespoke spelling of
+    // the "in addition to {its|his|her|their} other [colors and ][creature
+    // ]types" carve-out. The marker composes the possessive-pronoun and CR
+    // 105.3 "colors and " axes already, and additionally recognises the
+    // "creature types" scope this arm never spelled out. Derive
+    // replace-vs-add from the matched marker's "colors and " axis exactly as
+    // the plural arm does: a "colors"-only carve-out (no "types" following)
+    // has no marker representation and no corpus card pairs it with an
+    // `<subject> is a N/M …` head, so nothing regresses by not representing
+    // it here.
+    let (type_text, rest, suffix) = match split_in_addition_tail(rest) {
+        Some((type_text, marker)) => {
+            let after_prefix = rest[type_text.len()..].trim_start();
+            let after_marker = &after_prefix[marker.len()..];
+            let suffix = if nom_primitives::scan_contains(marker, "colors and ") {
+                AdditiveSuffix::ColorsAndTypes
+            } else {
+                AdditiveSuffix::Types
+            };
+            (type_text, after_marker, suffix)
+        }
+        None => {
+            let (type_text, rest) = split_at_body_boundary(rest);
+            (type_text, rest, AdditiveSuffix::None)
+        }
     };
 
     // CR 707.9d: derive the replace-vs-add axes from the carve-out. No carve-out
@@ -667,7 +678,6 @@ fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModifi
     let (replace_color, replace_types) = match suffix {
         AdditiveSuffix::None => (true, true),
         AdditiveSuffix::Types => (true, false),
-        AdditiveSuffix::Colors => (false, true),
         AdditiveSuffix::ColorsAndTypes => (false, false),
     };
 
@@ -708,8 +718,18 @@ fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModifi
 /// Subject and copula come from the shared axes, so `it`/`he`/`she`/`they`/
 /// `the token`/`the copy` and every apostrophe spelling are covered without
 /// enumerating their product.
+///
+/// CR 707.9b: the article is OPTIONAL (`opt(nom_primitives::parse_article)`,
+/// the file's existing "a "/"an " combinator). Welcome to Valley prints the
+/// article-bearing bare-P/T body ("except it's a 1/1."); Quicksilver
+/// Gargantuan prints the article-less one ("except it's 7/7"). Both reduce to
+/// the same output — the article carries no semantic content once the type
+/// list is empty — so admitting it costs nothing and the terminator `peek`
+/// still keeps this arm disjoint from [`parse_subject_pt_and_types`], which
+/// requires the article AND a following type list.
 fn parse_subject_pt_only(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
     let (rest, ()) = parse_copy_subject_and_copula(input).ok()?;
+    let (rest, _) = opt(nom_primitives::parse_article).parse(rest).ok()?;
     let (rest, (power, toughness)) = parse_pt_pair(rest)?;
     peek(alt((
         value((), eof),
@@ -763,6 +783,32 @@ fn parse_theyre_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModific
         .ok()?;
 
     let (rest, (power, toughness)) = parse_pt_pair(rest)?;
+
+    // CR 707.9b: a bare plural P/T body with no type list ("they're 2/2 and
+    // have haste", Gut, Zealous Fanatic) must decline HERE rather than
+    // swallow the remainder as a bogus type list — `append_color_and_type_
+    // modifications` would otherwise fabricate subtypes out of ordinary
+    // words ("have"/"haste") or an inverted supertype ("they aren't
+    // legendary"). Declining lets `parse_subject_pt_only` (the sibling that
+    // already covers every pronoun via the shared subject/copula axes,
+    // including `they're`) claim the P/T override and return the trailing
+    // " and …" conjunct to `parse_except_clause`'s loop, where the plural
+    // keyword/supertype arms parse it on the next iteration. Same terminator
+    // set as `parse_subject_pt_only`'s boundary peek, checked BEFORE the
+    // following space is consumed so `" and "` still matches with its
+    // leading space intact.
+    if peek(alt((
+        value((), eof),
+        value((), tag::<_, _, OracleError<'_>>(",")),
+        value((), tag(".")),
+        value((), tag(" and ")),
+    )))
+    .parse(rest)
+    .is_ok()
+    {
+        return None;
+    }
+
     let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest).ok()?;
 
     let (type_text, rest, suffix) = match split_in_addition_tail(rest) {
@@ -791,7 +837,6 @@ fn parse_theyre_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModific
     let (replace_color, replace_types) = match suffix {
         AdditiveSuffix::None => (true, true),
         AdditiveSuffix::Types => (true, false),
-        AdditiveSuffix::Colors => (false, true),
         AdditiveSuffix::ColorsAndTypes => (false, false),
     };
 
@@ -1047,7 +1092,6 @@ fn parse_its_a_type_in_addition(input: &str) -> Option<(&str, Vec<ContinuousModi
     let (replace_color, replace_types) = match suffix {
         AdditiveSuffix::None => (true, true),
         AdditiveSuffix::Types => (true, false),
-        AdditiveSuffix::Colors => (false, true),
         AdditiveSuffix::ColorsAndTypes => (false, false),
     };
     let mut mods = Vec::new();
@@ -1833,22 +1877,6 @@ fn split_at_if_type_boundary(text: &str) -> (&str, &str) {
         Some(i) => (&text[..i], &text[i..]),
         None => (text, ""),
     }
-}
-
-/// Structural multi-candidate splitter: return the (before, after) pair for the
-/// earliest-matching phrase in `candidates`. None if no candidate matches.
-fn split_on_first_of<'a>(text: &'a str, candidates: &[&str]) -> Option<(&'a str, &'a str)> {
-    let mut best: Option<(usize, usize)> = None;
-    for phrase in candidates {
-        if let Ok((_, (before, _))) = nom_primitives::split_once_on(text, phrase) {
-            let pos = before.len();
-            if best.is_none_or(|(bp, _)| pos < bp) {
-                best = Some((pos, phrase.len()));
-            }
-        }
-    }
-    let (pos, len) = best?;
-    Some((&text[..pos], &text[pos + len..]))
 }
 
 /// Parse "N/M" where N and M are positive integers. Input is already lowercase.
@@ -3585,6 +3613,78 @@ mod tests {
                 .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. })),
             "CR 205.1b: an \"in addition to their other types\" carve-out must NOT wipe the \
              copied creature types; got {mods:?}"
+        );
+    }
+
+    /// Final review round 1, [MED] finding 1 (CR 707.9b): Welcome to Valley —
+    /// "except it's a 1/1." The article-bearing bare-P/T body was dropped
+    /// entirely (base: `additional_modifications` is empty) because
+    /// `parse_subject_pt_only` required the P/T pair to follow the copula
+    /// directly, with no article, while `parse_subject_pt_and_types` requires
+    /// the article AND a following type list — so "a 1/1." satisfied neither
+    /// arm and fell through to the fail-soft skip.
+    #[test]
+    fn welcome_to_valley_article_bearing_bare_pt_sets_pt() {
+        assert_eq!(
+            mods_of(", except it's a 1/1.", "Card"),
+            vec![
+                ContinuousModification::SetPower { value: 1 },
+                ContinuousModification::SetToughness { value: 1 },
+            ]
+        );
+    }
+
+    /// Final review round 1, [MED] finding 2 (CR 707.9b): Gut, Zealous Fanatic
+    /// — "except they're 2/2 and have haste". Base: `parse_theyre_pt_and_types`
+    /// claimed the whole remainder as a bogus type list and fabricated
+    /// `AddSubtype{"Have"}` / `AddSubtype{"Haste"}` (plus a spurious
+    /// `RemoveAllSubtypes{Creature}` + `AddType{Creature}` pair) instead of
+    /// `AddKeyword{Haste}`. The fix makes `parse_theyre_pt_and_types` decline a
+    /// bare plural P/T body so `parse_subject_pt_only` claims the override and
+    /// hands the trailing " and have haste" conjunct back to
+    /// `parse_except_clause`'s loop, where the plural, subject-less
+    /// `parse_has_keywords` arm (widened to accept "have" as well as "has")
+    /// parses it.
+    #[test]
+    fn gut_zealous_fanatic_bare_plural_pt_and_have_haste() {
+        assert_eq!(
+            mods_of(
+                ", except they're 2/2 and have haste",
+                "Gut, Zealous Fanatic"
+            ),
+            vec![
+                ContinuousModification::SetPower { value: 2 },
+                ContinuousModification::SetToughness { value: 2 },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste
+                },
+            ]
+        );
+    }
+
+    /// Final review round 1, [MED] finding 2 (CR 707.9b + CR 205.4): Uugguu,
+    /// the Omniplasm — "except they're 2/2 and they aren't legendary". Base:
+    /// the same bogus-type-list swallow fabricated `AddSubtype{"They"}` /
+    /// `AddSubtype{"Aren't"}` and, worse, an INVERTED `AddSupertype{Legendary}`
+    /// instead of `RemoveSupertype{Legendary}` — the exact opposite of what the
+    /// card says. Once the bare-P/T body declines in `parse_theyre_pt_and_types`
+    /// and `parse_subject_pt_only` claims it, the repeated-subject continuation
+    /// "they aren't legendary" reaches the existing `parse_isnt_supertype` arm
+    /// unmodified (it already accepts the plural "they" subject).
+    #[test]
+    fn uugguu_omniplasm_bare_plural_pt_and_arent_legendary() {
+        assert_eq!(
+            mods_of(
+                ", except they're 2/2 and they aren't legendary",
+                "Uugguu, the Omniplasm"
+            ),
+            vec![
+                ContinuousModification::SetPower { value: 2 },
+                ContinuousModification::SetToughness { value: 2 },
+                ContinuousModification::RemoveSupertype {
+                    supertype: Supertype::Legendary,
+                },
+            ]
         );
     }
 
