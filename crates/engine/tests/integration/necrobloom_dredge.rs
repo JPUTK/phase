@@ -53,11 +53,7 @@
 //! - CR 109.4 + CR 108.4a: a graveyard object has no controller; use its owner.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::game::zones::{add_to_zone, remove_from_zone};
-use engine::types::ability::{
-    AbilityDefinition, AbilityKind, DrawReplacementScope, Effect, QuantityExpr,
-    ReplacementDefinition, ReplacementMode, TargetFilter,
-};
+use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -65,7 +61,7 @@ use engine::types::keywords::Keyword;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
-use engine::types::zones::{EtbTapState, Zone};
+use engine::types::zones::Zone;
 
 const NECROBLOOM_ORACLE: &str = "Landfall — Whenever a land you control enters, create a 0/1 green Plant creature token. If you control seven or more lands with different names, create a 2/2 black Zombie creature token instead.\nLand cards in your graveyard have dredge 2. (You may return a land card from your graveyard to your hand and mill two cards instead of drawing a card.)";
 
@@ -143,49 +139,25 @@ fn replacement_prompt(runner: &GameRunner) -> Option<Vec<(ObjectId, String)>> {
     }
 }
 
-/// Mirrors `database::synthesis::dredge_replacement_definition` (the extracted
-/// printed/granted shared builder) so a test-side "printed dredge" object gets
-/// the SAME real object-carried candidate shape `synthesize_dredge` would have
-/// produced — this crate boundary can't call the `pub(crate)` engine builder
-/// directly, so the shape is reproduced verbatim rather than approximated.
-fn printed_dredge_replacement(n: u32) -> ReplacementDefinition {
-    let return_to_hand = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::ChangeZone {
-            origin: Some(Zone::Graveyard),
-            destination: Zone::Hand,
-            target: TargetFilter::SelfRef,
-            owner_library: false,
-            enter_transformed: false,
-            enters_under: None,
-            enter_tapped: EtbTapState::Unspecified,
-            enters_attacking: false,
-            up_to: false,
-            enter_with_counters: vec![],
-            conditional_enter_with_counters: vec![],
-            face_down_profile: None,
-            enters_modified_if: None,
-        },
+/// Reach-guard for the printed-dredge fixtures, which are built from Oracle
+/// `"Dredge N"` so the scenario harness's production `synthesize_all` (and so
+/// `synthesize_dredge`) creates their object-carried Draw replacement: the
+/// object must really carry the printed keyword AND the synthesized candidate,
+/// so a "one candidate" row cannot pass on a board that has no printed dredge.
+fn assert_printed_dredge(runner: &GameRunner, id: ObjectId, n: u32) {
+    let obj = runner.state().objects.get(&id).expect("object must exist");
+    assert!(
+        obj.keywords.contains(&Keyword::Dredge(n)),
+        "fixture must carry printed Dredge {n}, got {:?}",
+        obj.keywords
     );
-    let mut mill = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::Mill {
-            count: QuantityExpr::Fixed { value: n as i32 },
-            target: TargetFilter::Controller,
-            destination: Zone::Graveyard,
-        },
+    assert!(
+        obj.replacement_definitions
+            .as_slice()
+            .iter()
+            .any(|r| matches!(r.event, ReplacementEvent::Draw)),
+        "synthesize_dredge must have produced the printed Draw replacement"
     );
-    mill.sub_ability = Some(Box::new(return_to_hand));
-    let mut repl = ReplacementDefinition::new(ReplacementEvent::Draw)
-        .draw_scope(DrawReplacementScope::IndividualDraw)
-        .active_zones(vec![Zone::Graveyard]);
-    repl.mode = ReplacementMode::Optional { decline: None };
-    repl.description = Some(format!(
-        "CR 702.52a: Dredge — instead of drawing, you may mill {n} cards and return this \
-         card from your graveyard to your hand."
-    ));
-    repl.execute = Some(Box::new(mill));
-    repl
 }
 
 /// Row 1 (positive) + Row 5: a land with no printed Dredge, sitting in the
@@ -401,8 +373,7 @@ fn necrobloom_printed_and_granted_dredge_both_surface_with_distinct_labels() {
     let land = scenario.add_land_to_graveyard(P0, "Forest").id();
     let printed = scenario
         .add_creature_to_graveyard(P0, "Test Dredger", 1, 1)
-        .with_keyword(Keyword::Dredge(3))
-        .with_replacement_definition(printed_dredge_replacement(3))
+        .from_oracle_text_with_keywords(&["Dredge"], "Dredge 3")
         .id();
     let mut runner = scenario.build();
 
@@ -477,10 +448,10 @@ fn necrobloom_land_with_identical_printed_dredge_offers_one_candidate() {
     scenario.add_creature_from_oracle(P0, "The Necrobloom", 2, 7, NECROBLOOM_ORACLE);
     let dakmor = scenario
         .add_land_to_graveyard(P0, "Dakmor Salvage")
-        .with_keyword(Keyword::Dredge(2))
-        .with_replacement_definition(printed_dredge_replacement(2))
+        .from_oracle_text_with_keywords(&["Dredge"], "Dredge 2")
         .id();
     let mut runner = scenario.build();
+    assert_printed_dredge(&runner, dakmor, 2);
     let hand_before = hand_len(&runner, P0);
     let library_before = runner.state().players[0].library.len();
 
@@ -554,8 +525,7 @@ fn necrobloom_land_with_differing_printed_dredge_offers_both_candidates() {
     scenario.add_creature_from_oracle(P0, "The Necrobloom", 2, 7, NECROBLOOM_ORACLE);
     let dakmor = scenario
         .add_land_to_graveyard(P0, "Dakmor Salvage")
-        .with_keyword(Keyword::Dredge(3))
-        .with_replacement_definition(printed_dredge_replacement(3))
+        .from_oracle_text_with_keywords(&["Dredge"], "Dredge 3")
         .id();
     let mut runner = scenario.build();
     let hand_before = hand_len(&runner, P0);
@@ -655,8 +625,7 @@ fn necrobloom_land_with_differing_printed_dredge_accepting_the_printed_one_retur
     scenario.add_creature_from_oracle(P0, "The Necrobloom", 2, 7, NECROBLOOM_ORACLE);
     let dakmor = scenario
         .add_land_to_graveyard(P0, "Dakmor Salvage")
-        .with_keyword(Keyword::Dredge(3))
-        .with_replacement_definition(printed_dredge_replacement(3))
+        .from_oracle_text_with_keywords(&["Dredge"], "Dredge 3")
         .id();
     let mut runner = scenario.build();
     let hand_before = hand_len(&runner, P0);
@@ -857,17 +826,25 @@ fn necrobloom_removed_mid_choice_stale_accept_degrades_to_normal_draw() {
         .position(|c| c.source_id == land && c.description != "Decline")
         .expect("land's accept option must be present before Necrobloom is removed");
 
-    // Destroy Necrobloom now, with the choice still parked: raw zone move
-    // (mirrors the established `remove_from_zone` + `add_to_zone` + explicit
-    // `.zone` pattern used elsewhere in this crate's integration tests to
-    // simulate an off-pipeline removal) so the grant is gone by the time the
-    // stale "Accept" index is submitted.
-    {
-        let state = runner.state_mut();
-        remove_from_zone(state, necrobloom, Zone::Battlefield, P0);
-        add_to_zone(state, necrobloom, Zone::Graveyard, P0);
-        state.objects.get_mut(&necrobloom).unwrap().zone = Zone::Graveyard;
-    }
+    // Destroy Necrobloom now, with the choice still parked, through the
+    // production replacement-aware zone pipeline (CR 704.5g lethal-damage SBA
+    // move: `ZoneMoveRequest::state_based_action` → `ProposedEvent::ZoneChange`)
+    // so the grant is gone by the time the stale "Accept" index is submitted.
+    let mut events = Vec::new();
+    let needs_choice = move_object_for_test(
+        runner.state_mut(),
+        ZoneMoveRequest::state_based_action(necrobloom, Zone::Graveyard),
+        &mut events,
+    );
+    assert!(
+        !needs_choice,
+        "no replacement applies to Necrobloom's death; the move must complete immediately"
+    );
+    assert_eq!(
+        zone_of(&runner, necrobloom),
+        Zone::Graveyard,
+        "Necrobloom must have left the battlefield before the stale choice is submitted"
+    );
 
     runner
         .act(GameAction::ChooseReplacement { index: accept_idx })
@@ -1244,8 +1221,7 @@ fn necrobloom_two_granted_plus_printed_accepting_a_granted_one_reoffers_nothing(
     let sibling = scenario.add_land_to_graveyard(P0, "Island").id();
     let printed = scenario
         .add_creature_to_graveyard(P0, "Test Dredger", 1, 1)
-        .with_keyword(Keyword::Dredge(3))
-        .with_replacement_definition(printed_dredge_replacement(3))
+        .from_oracle_text_with_keywords(&["Dredge"], "Dredge 3")
         .id();
     let mut runner = scenario.build();
     let hand_before = hand_len(&runner, P0);
@@ -1353,8 +1329,7 @@ fn necrobloom_two_granted_plus_printed_accepting_the_printed_one_reoffers_neithe
     let b = scenario.add_land_to_graveyard(P0, "Island").id();
     let printed = scenario
         .add_creature_to_graveyard(P0, "Test Dredger", 1, 1)
-        .with_keyword(Keyword::Dredge(3))
-        .with_replacement_definition(printed_dredge_replacement(3))
+        .from_oracle_text_with_keywords(&["Dredge"], "Dredge 3")
         .id();
     let mut runner = scenario.build();
     let hand_before = hand_len(&runner, P0);

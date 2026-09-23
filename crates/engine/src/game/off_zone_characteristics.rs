@@ -385,22 +385,62 @@ fn modification_can_add_keyword_kind(
         ContinuousModification::RemoveKeyword { .. }
         | ContinuousModification::RemoveChosenKeyword
         | ContinuousModification::RemoveAllAbilities => false,
-        // Unreachable under the `supports_off_zone_keyword_query` conjunct in
-        // `effect_can_add_off_zone_keyword_kind`; present only because
-        // `ContinuousModification` has many non-keyword arms. The assertion is
-        // what turns silent drift into a test-time failure: a new
-        // keyword-ADDING arm admitted by `supports_off_zone_keyword_query` but
-        // left unclassified above would land here, make the hoisted guard
-        // answer `false`, and silently stop offering granted dredge.
-        _ => {
-            debug_assert!(
-                !supports_off_zone_keyword_query(&effect.modification),
-                "a modification admitted by `supports_off_zone_keyword_query` must be \
-                 classified explicitly above: {:?}",
-                effect.modification
-            );
-            false
-        }
+        // Non-keyword arms: rejected by `supports_off_zone_keyword_query`, so
+        // unreachable under that conjunct in `effect_can_add_off_zone_keyword_kind`.
+        // Listed exhaustively (no wildcard) so a new `ContinuousModification`
+        // variant is a compile error here and must be classified explicitly —
+        // otherwise a new keyword-ADDING arm would silently answer `false` and
+        // stop offering granted dredge.
+        ContinuousModification::CopyValues { .. }
+        | ContinuousModification::CopyChosen
+        | ContinuousModification::SetName { .. }
+        | ContinuousModification::SetTextName { .. }
+        | ContinuousModification::AddPower { .. }
+        | ContinuousModification::AddToughness { .. }
+        | ContinuousModification::SetPower { .. }
+        | ContinuousModification::SetToughness { .. }
+        | ContinuousModification::GrantAbility { .. }
+        | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+        | ContinuousModification::GrantTrigger { .. }
+        | ContinuousModification::GrantReplacement { .. }
+        | ContinuousModification::AddType { .. }
+        | ContinuousModification::RemoveType { .. }
+        | ContinuousModification::AddSubtype { .. }
+        | ContinuousModification::RemoveSubtype { .. }
+        | ContinuousModification::SetCardTypes { .. }
+        | ContinuousModification::RemoveAllSubtypes { .. }
+        | ContinuousModification::SetDynamicPower { .. }
+        | ContinuousModification::SetDynamicToughness { .. }
+        | ContinuousModification::SetPowerDynamic { .. }
+        | ContinuousModification::SetToughnessDynamic { .. }
+        | ContinuousModification::AddDynamicPower { .. }
+        | ContinuousModification::AddDynamicToughness { .. }
+        | ContinuousModification::AddAllCreatureTypes
+        | ContinuousModification::AddAllBasicLandTypes
+        | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddChosenSubtype { .. }
+        | ContinuousModification::AddChosenColor { .. }
+        | ContinuousModification::SetColor { .. }
+        | ContinuousModification::AddColor { .. }
+        | ContinuousModification::AddStaticMode { .. }
+        | ContinuousModification::GrantStaticAbility { .. }
+        | ContinuousModification::SwitchPowerToughness
+        | ContinuousModification::AssignDamageFromToughness
+        | ContinuousModification::AssignDamageAsThoughUnblocked
+        | ContinuousModification::AssignNoCombatDamage
+        | ContinuousModification::ChangeController
+        | ContinuousModification::SetBasicLandType { .. }
+        | ContinuousModification::SetChosenBasicLandType
+        | ContinuousModification::SetChosenName
+        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::RetainAllOtherAbilitiesFromSource
+        | ContinuousModification::AddSupertype { .. }
+        | ContinuousModification::RemoveSupertype { .. }
+        | ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::SetStartingLoyalty { .. }
+        | ContinuousModification::RemoveManaCost => false,
     }
 }
 
