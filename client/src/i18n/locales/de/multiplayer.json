@@ -79,6 +79,7 @@
     "draws_one": " ({{count}} Unentschieden)",
     "draws_other": " ({{count}} Unentschieden)",
     "main": "Haupt ({{count}}, min. {{min}})",
+    "mainNoMinimum": "Haupt ({{count}})",
     "sideboard": "Sideboard ({{count}})",
     "sideboardCapped": "Sideboard ({{count}}/{{max}})",
     "moveFromSideboard": "Karten aus dem Sideboard verschieben.",
@@ -95,6 +96,9 @@
     "title": "Lobby-Server nicht erreichbar",
     "message": "Dein Spiel wird nicht öffentlich gelistet. Du kannst trotzdem über P2P hosten — teile einfach den Raumcode direkt mit deinem Gegner.",
     "continueWithoutLobby": "Ohne Lobby fortfahren"
+  },
+  "lobbyCapability": {
+    "formatNeedsNewerServer": "Dieser Lobby-Server ist zu alt, um Spiele im gewählten Format aufzulisten (er benötigt Lobby-Protokoll {{needed}})."
   },
   "joinErrorDialog": {
     "dismiss": "Schließen"

@@ -79,6 +79,7 @@
     "draws_one": " ({{count}} pareggio)",
     "draws_other": " ({{count}} pareggi)",
     "main": "Principale ({{count}}, min {{min}})",
+    "mainNoMinimum": "Principale ({{count}})",
     "sideboard": "Sideboard ({{count}})",
     "sideboardCapped": "Sideboard ({{count}}/{{max}})",
     "moveFromSideboard": "Sposta carte dalla sideboard.",
@@ -95,6 +96,9 @@
     "title": "Server della lobby irraggiungibile",
     "message": "La tua partita non sarà elencata pubblicamente. Puoi comunque ospitare tramite P2P — basta condividere direttamente il codice della stanza con il tuo avversario.",
     "continueWithoutLobby": "Continua senza lobby"
+  },
+  "lobbyCapability": {
+    "formatNeedsNewerServer": "Questo server della lobby è troppo vecchio per elencare partite nel formato selezionato (richiede il protocollo lobby {{needed}})."
   },
   "joinErrorDialog": {
     "dismiss": "Ignora"
