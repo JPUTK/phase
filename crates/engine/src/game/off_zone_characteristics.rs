@@ -440,7 +440,18 @@ fn modification_can_add_keyword_kind(
         | ContinuousModification::RemoveSupertype { .. }
         | ContinuousModification::AddCounterOnEnter { .. }
         | ContinuousModification::SetStartingLoyalty { .. }
-        | ContinuousModification::RemoveManaCost => false,
+        | ContinuousModification::RemoveManaCost => {
+            // The exhaustive list catches a NEW variant at compile time; this
+            // assertion catches an EXISTING listed variant later admitted by
+            // `supports_off_zone_keyword_query` without being classified above.
+            debug_assert!(
+                !supports_off_zone_keyword_query(&effect.modification),
+                "a modification admitted by `supports_off_zone_keyword_query` must be \
+                 classified explicitly above: {:?}",
+                effect.modification
+            );
+            false
+        }
     }
 }
 

@@ -826,10 +826,11 @@ fn necrobloom_removed_mid_choice_stale_accept_degrades_to_normal_draw() {
         .position(|c| c.source_id == land && c.description != "Decline")
         .expect("land's accept option must be present before Necrobloom is removed");
 
-    // Destroy Necrobloom now, with the choice still parked, through the
-    // production replacement-aware zone pipeline (CR 704.5g lethal-damage SBA
-    // move: `ZoneMoveRequest::state_based_action` → `ProposedEvent::ZoneChange`)
-    // so the grant is gone by the time the stale "Accept" index is submitted.
+    // Put Necrobloom into its owner's graveyard now, with the choice still
+    // parked, through the production replacement-aware zone pipeline (the
+    // CR 704.5f zero-toughness SBA route: `ZoneMoveRequest::state_based_action`
+    // → `ProposedEvent::ZoneChange`) so the grant is gone by the time the stale
+    // "Accept" index is submitted.
     let mut events = Vec::new();
     let needs_choice = move_object_for_test(
         runner.state_mut(),
