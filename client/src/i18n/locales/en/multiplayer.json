@@ -79,6 +79,7 @@
     "draws_one": " ({{count}} draw)",
     "draws_other": " ({{count}} draws)",
     "main": "Main ({{count}}, min {{min}})",
+    "mainNoMinimum": "Main ({{count}})",
     "sideboard": "Sideboard ({{count}})",
     "sideboardCapped": "Sideboard ({{count}}/{{max}})",
     "moveFromSideboard": "Move cards from the sideboard.",
@@ -95,6 +96,9 @@
     "title": "Lobby server unreachable",
     "message": "Your game won't be publicly listed. You can still host over P2P — just share the room code directly with your opponent.",
     "continueWithoutLobby": "Continue without lobby"
+  },
+  "lobbyCapability": {
+    "formatNeedsNewerServer": "This lobby server is too old to list games in the selected format (it needs lobby protocol {{needed}})."
   },
   "joinErrorDialog": {
     "dismiss": "Dismiss"

@@ -24554,6 +24554,23 @@ impl AbilityTag {
             AbilityTag::Augment => "augment",
         }
     }
+
+    /// Inverse of [`Self::keyword_str`], for legacy plain-text `Display`/
+    /// `FromStr` round-trips (`StaticMode`'s test-only string codec).
+    pub fn from_keyword_str(s: &str) -> Option<Self> {
+        match s {
+            "boast" => Some(AbilityTag::Boast),
+            "evolve" => Some(AbilityTag::Evolve),
+            "exhaust" => Some(AbilityTag::Exhaust),
+            "outlast" => Some(AbilityTag::Outlast),
+            "cycling" => Some(AbilityTag::Cycling),
+            "backup" => Some(AbilityTag::Backup),
+            "power-up" => Some(AbilityTag::PowerUp),
+            "equip" => Some(AbilityTag::Equip),
+            "augment" => Some(AbilityTag::Augment),
+            _ => None,
+        }
+    }
 }
 
 /// Structured activation-time restrictions parsed from Oracle text.

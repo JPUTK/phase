@@ -60,6 +60,34 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 77 — Prospective: no `GameState` or `GameAction` shape change lands in
+///      this commit. Moved ahead of new `GameFormat` variants.
+///      `GameFormat` serializes as its `Display`
+///      string and deserializes through `FromStr`
+///      (`crates/engine/src/types/format.rs`), whose unknown-name arm
+///      returns `Err`, so a build that predates the new format
+///      names hard-errors when it deserializes a payload naming one into
+///      `GameFormat`. That arm is not reached by a custom format: `FromStr`
+///      short-circuits on the `Custom:` prefix and parses the id, failing
+///      only when it is not a `u16`, so a `Custom:<id>` payload still
+///      deserializes. Pinned by
+///      `custom_format_schema::game_format_deserialize_rejects_malformed_custom_strings`
+///      (whose inputs include `"NotARealFormat"`) and
+///      `::game_format_from_str_display_roundtrip_custom`. The browser half
+///      does not hard-error at all: it decodes with `JSON.parse` and its
+///      TypeScript types are erased at runtime, so an unknown format name
+///      arrives there as an ordinary string. The break is one-directional.
+///      On THIS surface the full-game session is exact-match at the
+///      handshake (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`,
+///      `MIN_SUPPORTED_SERVER_PROTOCOL == PROTOCOL_VERSION`, plus the
+///      client's `info.protocolVersion > PROTOCOL_VERSION` ceiling), so no
+///      older peer ever receives a v77 `GameState` at all and the
+///      deserializer asymmetry above never gets a chance to matter here —
+///      see [`LOBBY_PROTOCOL_VERSION`]'s own `/// 11` entry for the surface
+///      where it does. (Written as one unbroken paragraph on purpose, per
+///      the reason entry 5 gives: a blank `///` line before 4-space
+///      indented prose is an indented CODE block to rustdoc.)
+///
 /// 76 — CR 601.2f caster-elected cost-reduction ordering:
 ///      `WaitingFor::OrderCostReductions` and `GameAction::OrderCostReductions`
 ///      are new variants on two `#[serde(tag = "type", content = "data")]`
@@ -571,7 +599,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 76;
+pub const PROTOCOL_VERSION: u32 = 77;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -598,6 +626,41 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 /// broker's window went disjoint from the shipped client's. This constant is
 /// the fix — it moves only for reasons the lobby can actually observe.
 ///
+/// 11 — Prospective: no lobby variant or field changes shape in this
+///      commit. Moved ahead of new `GameFormat` variants.
+///      [`MIN_SUPPORTED_LOBBY_PROTOCOL`] stays at 2 — see
+///      below for why. `GameFormat` serializes as its `Display` string and
+///      deserializes through `FromStr`
+///      (`crates/engine/src/types/format.rs`), whose unknown-name arm
+///      returns `Err`, so a build that predates the new format
+///      names hard-errors when it deserializes a payload naming one into
+///      `GameFormat`. That arm is not reached by a custom format: `FromStr`
+///      short-circuits on the `Custom:` prefix and parses the id, failing
+///      only when it is not a `u16`, so a `Custom:<id>` payload still
+///      deserializes. Pinned by
+///      `custom_format_schema::game_format_deserialize_rejects_malformed_custom_strings`
+///      (whose inputs include `"NotARealFormat"`) and
+///      `::game_format_from_str_display_roundtrip_custom`. The browser half
+///      does not hard-error at all: it decodes with `JSON.parse` and its
+///      TypeScript types are erased at runtime, so an unknown format name
+///      arrives there as an ordinary string. The break is one-directional.
+///      On THIS surface the broker -> client direction still decodes a
+///      payload naming a format it predates: the deserializer there is the
+///      browser's `JSON.parse`, and `JoinTargetInfo` / `PeerInfo` on
+///      [`LobbyServerMessage`] (this file's entry 2 names both carriers)
+///      each reach `FormatConfig -> GameFormat`, so a v11 broker's replies
+///      genuinely carry one. A client naming `Freeform` or
+///      `FreeformCommander` to a Rust broker below 11 fails:
+///      `GameFormat::deserialize` rejects the frame. The client-side floor
+///      for that pairing is `MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS` in
+///      `client/src/adapter/ws-adapter.ts`. [`MIN_SUPPORTED_LOBBY_PROTOCOL`]
+///      does not move: moving it would evict every v2–v10 lobby client from
+///      browsing and joining over a value most of them will never
+///      encounter. [`PROTOCOL_VERSION`] does not move alongside it either: no
+///      variant here carries `GameState` or `GameAction`. (Written as one
+///      unbroken paragraph on purpose, per the reason entry 5 gives:
+///      a blank `///` line before 4-space indented prose is an indented
+///      CODE block to rustdoc.)
 /// 10 — Requested room codes. `CreateGameWithSettings` gains an optional
 ///     `requested_code` (`#[serde(default)]`) — the "a lobby field is added"
 ///     trigger — carrying a caller-pre-minted `[A-Z0-9]{6}` code (the Discord
@@ -796,7 +859,7 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 ///     that direction can reject — into one legible handshake refusal.
 /// 1 — Initial lobby-owned version, covering the `LobbyClientMessage` /
 ///     `LobbyServerMessage` variant sets, unchanged since #1880.
-pub const LOBBY_PROTOCOL_VERSION: u32 = 10;
+pub const LOBBY_PROTOCOL_VERSION: u32 = 11;
 
 /// Lowest [`LOBBY_PROTOCOL_VERSION`] a broker accepts from a client.
 ///
@@ -1705,13 +1768,22 @@ mod tests {
     /// rather than silently re-coupling the lobby to full-game churn.
     #[test]
     fn lobby_protocol_version_is_independent_of_the_full_game_one() {
-        assert_eq!(LOBBY_PROTOCOL_VERSION, 10);
-        // Deliberately still 2, not 6: lobby versions 3, 4 and 5 are purely
-        // additive, as are 7 through 10, and 6 is additive in the only direction this floor governs
-        // — its server → client fields are ignored by a consumer that does not
-        // name them, and its one relaxation makes the broker MORE permissive —
-        // so a version-2 client parses every frame it already understood and is
-        // not evicted. See the constant's own changelog.
+        assert_eq!(LOBBY_PROTOCOL_VERSION, 11);
+        // Deliberately still 2, not 11: every lobby version past 2 keeps this
+        // floor's guarantee — that a version-2 client can still parse every
+        // frame it already understands. Individually: 3 is additive in both
+        // directions (an optional, defaulted field); 4 adds variants only,
+        // harmless to a v2 client's `JSON.parse` handling; 5 is
+        // additive in both directions (variants plus an optional, defaulted
+        // field); 6 is additive in the only direction this floor governs — its
+        // server → client fields are ignored by a consumer that doesn't name
+        // them — and its relaxation (`scoring`) makes the broker MORE
+        // permissive, not less; 7 and 8 are additive, optional fields only; 9
+        // is additive, a client → broker field a version-2 client, predating
+        // it, never sends; 10 adds an optional, defaulted `requested_code`
+        // field plus two additive `ServerErrorCode` variants, both ignored by
+        // a pre-10 consumer; 11 adds no field or variant. See the constant's
+        // own changelog.
         assert_eq!(MIN_SUPPORTED_LOBBY_PROTOCOL, 2);
         assert_ne!(
             LOBBY_PROTOCOL_VERSION, PROTOCOL_VERSION,
@@ -1731,12 +1803,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 76);
+        assert_eq!(PROTOCOL_VERSION, 77);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 75);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 76);
     }
 
     #[test]
@@ -1865,40 +1937,52 @@ mod tests {
         }
     }
 
-    /// The tournament wire surface spans THREE lobby versions: 4 introduced the
+    /// The tournament chain spans EIGHT lobby versions: 4 introduced the
     /// message set on top of the `FormatConfig` capability bump at 3, 5 added
-    /// request-correlated settlement for its four gated actions, and 6 moved
-    /// action legality, default scoring and credential lifetime onto the wire.
+    /// request-correlated settlement for its four gated actions, 6 moved
+    /// action legality, default scoring and credential lifetime onto the
+    /// wire, 7 added a game-format label and an "automatic + N" round
+    /// option, 8 added the match-structure choice (Bo1 / Bo3), 9 added
+    /// credential-rotation idempotency, 10 added requested room codes, and 11
+    /// is a pre-emptive bump that adds nothing on this surface at all.
     ///
     /// This test's predecessor asserted the tournament set sat exactly ONE bump
     /// past `FormatConfig` — a relationship that stopped being true the moment
     /// correlation took 5. Retargeting its number alone would have left a test
     /// whose name states a relationship it no longer checks, so the span is
-    /// what it pins now, and the name says so. The same reasoning applies
+    /// what it pins now, and the name says "chain", not "surface", because
+    /// not every step in it adds wire surface. The same reasoning applies
     /// again at 6, once more at 7 for the format label and the "automatic + N"
     /// round option, and again at 8 for the match structure (Bo1 / Bo3): the
     /// chain grows a step and the name grows with it, rather than the tail
-    /// constant being quietly re-pointed. Version 9 breaks the pattern the
-    /// earlier steps share — it adds NO wire surface, because rotation's
-    /// SEMANTICS changed while its frames stayed byte-identical — so it extends
-    /// the chain as a BEHAVIORAL step rather than a surface one, named to say so,
-    /// all the same rather than re-pointing the tail. Version 10 is the first
+    /// constant being quietly re-pointed. Version 9 DOES add wire surface —
+    /// `RenewTournamentCredential` gains `rotation_nonce`, `#[serde(default)]`
+    /// but with no `skip_serializing_if`, so it serializes unconditionally
+    /// once present — but the field is additive on both sides (a pre-9
+    /// broker ignores it; a pre-9 client simply never sends the frame), so
+    /// it extends the chain the same way 3 through 8 did rather than forcing
+    /// a floor move. Version 10 is the first
     /// step outside the tournament surface (requested room codes); it extends
     /// the chain so the tail stays pinned rather than re-pointed, and the name
-    /// grows with it, by the same rule.
+    /// grows with it, by the same rule. Version 11 is the one true non-surface
+    /// step: no field, no variant, moved ahead of new `GameFormat` variants;
+    /// see that constant's own `/// 11` entry.
     #[test]
-    fn the_tournament_surface_spans_lobby_versions_four_through_ten() {
+    fn the_tournament_chain_spans_lobby_versions_four_through_eleven() {
         const PRE_TOURNAMENT_LOBBY_VERSION: u32 = 3;
         const TOURNAMENT_SET_LOBBY_VERSION: u32 = PRE_TOURNAMENT_LOBBY_VERSION + 1;
         const CORRELATED_SETTLEMENT_LOBBY_VERSION: u32 = TOURNAMENT_SET_LOBBY_VERSION + 1;
         const BROKER_OWNED_POLICY_LOBBY_VERSION: u32 = CORRELATED_SETTLEMENT_LOBBY_VERSION + 1;
         const FORMAT_AND_PLUS_ROUNDS_LOBBY_VERSION: u32 = BROKER_OWNED_POLICY_LOBBY_VERSION + 1;
         const MATCH_STRUCTURE_LOBBY_VERSION: u32 = FORMAT_AND_PLUS_ROUNDS_LOBBY_VERSION + 1;
-        // The first NON-surface step: rotation semantics, no new wire frames.
+        // Adds a field (`rotation_nonce`) to an existing variant, additively.
         const RECOVERABLE_ROTATION_LOBBY_VERSION: u32 = MATCH_STRUCTURE_LOBBY_VERSION + 1;
         // The first step outside the tournament surface: requested room codes.
         const REQUESTED_ROOM_CODE_LOBBY_VERSION: u32 = RECOVERABLE_ROTATION_LOBBY_VERSION + 1;
-        assert_eq!(LOBBY_PROTOCOL_VERSION, REQUESTED_ROOM_CODE_LOBBY_VERSION);
+        // The one true non-surface step: no field, no variant — a
+        // pre-emptive bump moved ahead of new `GameFormat` variants.
+        const PREEMPTIVE_FORMAT_LOBBY_VERSION: u32 = REQUESTED_ROOM_CODE_LOBBY_VERSION + 1;
+        assert_eq!(LOBBY_PROTOCOL_VERSION, PREEMPTIVE_FORMAT_LOBBY_VERSION);
     }
 
     /// The guard for [`is_known_lobby_tag`], which is a string `matches!` and

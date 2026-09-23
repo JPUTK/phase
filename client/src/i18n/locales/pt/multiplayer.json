@@ -79,6 +79,7 @@
     "draws_one": " ({{count}} empate)",
     "draws_other": " ({{count}} empates)",
     "main": "Principal ({{count}}, mín. {{min}})",
+    "mainNoMinimum": "Principal ({{count}})",
     "sideboard": "Sideboard ({{count}})",
     "sideboardCapped": "Sideboard ({{count}}/{{max}})",
     "moveFromSideboard": "Mova cartas do sideboard.",
@@ -95,6 +96,9 @@
     "title": "Servidor de lobby inacessível",
     "message": "Seu jogo não será listado publicamente. Você ainda pode hospedar via P2P — basta compartilhar o código da sala diretamente com seu oponente.",
     "continueWithoutLobby": "Continuar sem lobby"
+  },
+  "lobbyCapability": {
+    "formatNeedsNewerServer": "Este servidor de lobby é muito antigo para listar partidas no formato selecionado (precisa do protocolo de lobby {{needed}})."
   },
   "joinErrorDialog": {
     "dismiss": "Dispensar"

@@ -79,6 +79,7 @@
     "draws_one": " ({{count}} remis)",
     "draws_other": " ({{count}} remisów)",
     "main": "Główna ({{count}}, min {{min}})",
+    "mainNoMinimum": "Główna ({{count}})",
     "sideboard": "Karty boczne ({{count}})",
     "sideboardCapped": "Karty boczne ({{count}}/{{max}})",
     "moveFromSideboard": "Przenieś karty z kart bocznych.",
@@ -95,6 +96,9 @@
     "title": "Serwer poczekalni nieosiągalny",
     "message": "Twoja gra nie będzie publicznie wyświetlana. Nadal możesz być gospodarzem przez P2P — po prostu udostępnij kod pokoju bezpośrednio przeciwnikowi.",
     "continueWithoutLobby": "Kontynuuj bez poczekalni"
+  },
+  "lobbyCapability": {
+    "formatNeedsNewerServer": "Ten serwer poczekalni jest za stary, aby wyświetlać gry w wybranym formacie (wymaga protokołu lobby {{needed}})."
   },
   "joinErrorDialog": {
     "dismiss": "Zamknij"

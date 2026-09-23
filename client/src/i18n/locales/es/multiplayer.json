@@ -79,6 +79,7 @@
     "draws_one": " ({{count}} empate)",
     "draws_other": " ({{count}} empates)",
     "main": "Principal ({{count}}, mín. {{min}})",
+    "mainNoMinimum": "Principal ({{count}})",
     "sideboard": "Banquillo ({{count}})",
     "sideboardCapped": "Banquillo ({{count}}/{{max}})",
     "moveFromSideboard": "Mueve cartas del banquillo.",
@@ -95,6 +96,9 @@
     "title": "Servidor de salas inaccesible",
     "message": "Tu partida no aparecerá públicamente en la lista. Aún puedes hospedar por P2P — simplemente comparte el código de la sala directamente con tu oponente.",
     "continueWithoutLobby": "Continuar sin sala de espera"
+  },
+  "lobbyCapability": {
+    "formatNeedsNewerServer": "Este servidor de salas es demasiado antiguo para listar partidas en el formato seleccionado (necesita el protocolo de lobby {{needed}})."
   },
   "joinErrorDialog": {
     "dismiss": "Descartar"

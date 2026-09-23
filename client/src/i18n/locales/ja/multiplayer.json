@@ -79,6 +79,7 @@
     "draws_one": "（{{count}}引き分け）",
     "draws_other": "（{{count}}引き分け）",
     "main": "メイン（{{count}}、最低{{min}}）",
+    "mainNoMinimum": "メイン（{{count}}）",
     "sideboard": "サイドボード（{{count}}）",
     "sideboardCapped": "サイドボード（{{count}}/{{max}}）",
     "moveFromSideboard": "サイドボードからカードを移動します。",
@@ -95,6 +96,9 @@
     "title": "ロビーサーバーに接続できません",
     "message": "ゲームは公開リストに表示されません。P2Pでホストし、対戦相手にルームコードを直接共有できます。",
     "continueWithoutLobby": "ロビーなしで続行"
+  },
+  "lobbyCapability": {
+    "formatNeedsNewerServer": "このロビーサーバーは古いため、選択したフォーマットのゲームを掲載できません（ロビープロトコル{{needed}}が必要です）。"
   },
   "joinErrorDialog": {
     "dismiss": "閉じる"
