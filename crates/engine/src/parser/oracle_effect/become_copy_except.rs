@@ -603,11 +603,27 @@ fn parse_rounding_sentence(input: &str) -> Option<(&str, RoundingMode)> {
 /// type/supertype/subtype — color is NOT carved out, so color still replaces there.
 ///
 /// No variant represents a "colors"-only carve-out (a carve-out that adds
-/// color but still replaces creature subtypes) — [`split_in_addition_tail`],
-/// the single authority for the CR 205.1b marker all three carve-out sites
-/// delegate to, only ever matches a marker ending in "types", so that
-/// carve-out has no marker representation and no corpus card pairs it with
-/// an `<subject> is a N/M …` head.
+/// color but still replaces creature subtypes). A prior draft of this fix
+/// widened [`split_in_addition_tail`]'s shared marker (`animation.rs`) to also
+/// match "in addition to its other colors" (no trailing "types") so this arm
+/// could represent that carve-out — but that marker is the single authority
+/// `has_in_addition_to_other_types`/`locate_in_addition_other_types_marker`
+/// also use from several OTHER unrelated call sites (`oracle_static/
+/// type_change.rs`, `oracle_effect/subject.rs`, `oracle_replacement.rs`,
+/// `oracle_classifier.rs`). Widening it flipped Opulent Clomper's "it becomes
+/// a random color that it isn't in addition to its other colors" from an
+/// honest `Effect::Unimplemented` (red coverage) to a wrong green parse that
+/// fabricated `AddSubtype{"Random"|"Color"|"That"|"It"}` — measured with a
+/// verbatim-Oracle-text probe across the four colors-only-marker faces
+/// (Higher Level Zone Monster, Indigo Faerie, Opulent Clomper, Painter's
+/// Servant) plus the existing `split_in_addition_tail` consumer anchors, both
+/// before and after the widening. Reverted for that reason: repairing this
+/// gap requires first making every marker consumer (not just this file's
+/// three carve-out sites) derive its own "colors"/"types" axis from the
+/// matched marker — `oracle_static/type_change.rs`'s two `has_in_addition_
+/// to_other_types` branches and `oracle_effect/subject.rs`'s three
+/// `is_additive` call sites in particular — which is a cross-cutting change
+/// spanning files outside this fix's scope, not a contained one.
 enum AdditiveSuffix {
     None,
     Types,
@@ -1652,8 +1668,12 @@ fn parse_isnt_supertype(input: &str) -> Option<(&str, ContinuousModification)> {
 }
 
 /// CR 205.4 + CR 707.9d: Match `"<subject pronoun>'s <supertype> in addition
-/// to its other types"`. Mirrors [`parse_subject_pt_and_types`]'s pronoun
-/// dispatch. Emits [`ContinuousModification::AddSupertype`].
+/// to {its|their|his|her} other [colors and ][creature ]types"`. Mirrors
+/// [`parse_subject_pt_and_types`]'s pronoun dispatch for the subject; the
+/// trailing carve-out marker delegates to [`split_in_addition_tail`], so
+/// "their"/"colors and "/"creature " are recognised here too even though no
+/// corpus card combines them with a bare supertype body today. Emits
+/// [`ContinuousModification::AddSupertype`].
 ///
 /// Sarkhan, Soul Aflame: `"… except its name is ~ and it's legendary in
 /// addition to its other types"` is the canonical case.
@@ -1672,14 +1692,24 @@ fn parse_is_supertype_in_addition(input: &str) -> Option<(&str, ContinuousModifi
     .parse(input)
     .ok()?;
     let (rest, supertype) = parse_supertype_word(rest)?;
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>(" in addition to its other types"),
-        tag(" in addition to his other types"),
-        tag(" in addition to her other types"),
+    // CR 205.1b: delegate the "in addition to {its|their|his|her} other
+    // [colors and ][creature ]types" carve-out marker to `split_in_addition_tail`
+    // (`animation.rs`) — the single authority [`parse_subject_pt_and_types`] and
+    // [`parse_theyre_pt_and_types`] already delegate to — instead of this arm's
+    // own narrower three-literal-tag spelling (no "their", no "colors and ", no
+    // "creature "). A supertype-only body has nothing between the supertype word
+    // and the marker, so a non-empty prefix means the marker belongs to a
+    // different clause further along and this arm must decline.
+    let (type_text, marker) = split_in_addition_tail(rest)?;
+    if !type_text.trim().is_empty() {
+        return None;
+    }
+    let after_prefix = rest[type_text.len()..].trim_start();
+    let after_marker = &after_prefix[marker.len()..];
+    Some((
+        after_marker,
+        ContinuousModification::AddSupertype { supertype },
     ))
-    .parse(rest)
-    .ok()?;
-    Some((rest, ContinuousModification::AddSupertype { supertype }))
 }
 
 /// CR 205.4 + CR 707.9d: Match `"<subject>'s <supertype>"` without the Sarkhan
