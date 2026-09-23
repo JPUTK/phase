@@ -11214,6 +11214,44 @@ fn strip_while_state_clause(condition: &str) -> Option<(String, WhileStateGate)>
     Some((condition[..pos].trim_end().to_string(), gate))
 }
 
+/// CR 701.27e: "Some triggered abilities trigger when an object 'transforms
+/// into' an object with a specified characteristic." Such a line is a TRIGGERED
+/// ABILITY even though it is printed with `As` rather than CR 603.1's
+/// `[When/Whenever/At]` templating (Sephiroth, One-Winged Angel; Shinryu,
+/// Transcendent Rival; Curse of Leeches; Olag, Ludevic's Hubris).
+///
+/// CR 614.1c: `As [this permanent] enters …` is a REPLACEMENT effect, and
+/// `As long as …` / `As an additional cost …` are a static and a cost. The
+/// `peek` is therefore not optional garnish — it is the disambiguation. The
+/// keyword is admitted ONLY when the very next tokens are a self-reference
+/// followed by `" transforms into "`, so no other `As` head can reach this arm.
+///
+/// CR 603.1: the `alt` this feeds sits beside the printed `When`/`Whenever`
+/// templating, so the widened lexicon is a strict superset — no existing head
+/// changes meaning.
+///
+/// The self-reference token is spelled as the GRAMMAR ("`~`", or "this
+/// ⟨word⟩") rather than as a copy of `oracle_util::SELF_REF_TYPE_PHRASES`,
+/// which would drift from that constant. `~` is the live production path
+/// (`normalize_card_name_refs` runs upstream of both consumers); the
+/// `this ⟨word⟩` arm is the robustness arm for direct callers such as
+/// `parse_trigger_line`. Admitting a slightly wider subject set costs nothing —
+/// the discriminating token is `" transforms into "`, and only a permanent can
+/// transform.
+pub(crate) fn parse_as_transforms_into_keyword(i: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        terminated(
+            tag("as "),
+            peek((
+                alt((tag("~"), recognize(preceded(tag("this "), alpha1)))),
+                tag(" transforms into "),
+            )),
+        ),
+    )
+    .parse(i)
+}
+
 pub(crate) fn parse_trigger_condition(
     condition: &str,
     ctx: &mut ParseContext,
@@ -11322,10 +11360,16 @@ pub(crate) fn parse_trigger_condition(
     }
 
     // --- Subject + event decomposition ---
-    // Strip leading "when"/"whenever" using nom alt()
+    // CR 603.1 + CR 701.27e: strip the leading trigger keyword. `When`/`Whenever`
+    // are CR 603.1's printed templating; the CR 701.27e `As … transforms into …`
+    // head is admitted through `parse_as_transforms_into_keyword`, which guards
+    // itself against CR 614.1c `As … enters` replacements. `At` is deliberately
+    // absent: phase triggers are claimed upstream by `try_parse_phase_trigger`
+    // before this runs, and stripping `at ` would strand the phase clause.
     let after_keyword = alt((
         value((), tag::<_, _, OracleError<'_>>("whenever ")),
         value((), tag("when ")),
+        parse_as_transforms_into_keyword,
     ))
     .parse(lower.as_str())
     .map(|(rest, _)| rest)

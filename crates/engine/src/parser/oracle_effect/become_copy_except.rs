@@ -30,11 +30,22 @@
 //!   → [`ContinuousModification::SetPower`] + [`ContinuousModification::SetToughness`]
 //!   plus an `AddType` / `AddSubtype` per word in the type list (CR 707.9b
 //!   + CR 613.1d).
-//! - `it's a(n) {core_type} in addition to its other types` (and the
-//!   elided-subject form `is a(n) {core_type} in addition to its other types`
-//!   for non-leading bodies in a comma-anded list)
-//!   → [`ContinuousModification::AddType`] (when the type word is a core type)
-//!   or [`ContinuousModification::AddSubtype`] (otherwise).
+//! - `<subject><copula> N/M` → [`ContinuousModification::SetPower`] +
+//!   [`ContinuousModification::SetToughness`] (CR 707.9b), with no
+//!   characteristic list.
+//! - `it's a(n) {descriptor word list} in addition to its other
+//!   [colors and ]types` (and the elided-subject form `is a(n) {descriptor
+//!   word list} in addition to its other …` for non-leading bodies in a
+//!   comma-anded list)
+//!   → one modification per descriptor word: a supertype word →
+//!   [`ContinuousModification::AddSupertype`], a core type word →
+//!   [`ContinuousModification::AddType`], a color word →
+//!   [`ContinuousModification::AddColor`] when the carve-out marker names
+//!   "colors and types" or [`ContinuousModification::SetColor`] (replacing
+//!   the copied colors) when it names only "types" (CR 105.3 + CR 707.9d),
+//!   an embedded `N/M` → [`ContinuousModification::SetPower`] +
+//!   [`ContinuousModification::SetToughness`] (CR 707.9b), and any other
+//!   word → [`ContinuousModification::AddSubtype`].
 //! - `it's a(n) {core_type}`
 //!   → [`ContinuousModification::SetCardTypes`] with that single core type.
 //! - `it has {keyword[, keyword, ...]}`
@@ -216,16 +227,19 @@ pub(crate) fn parse_except_clause<'a>(
 ///   - `<possessive> name is ~`                                → SetName(card_name)
 ///   - `<subject>'s N/M {type list} in addition to its other types`
 ///     → SetPower + SetToughness + AddType/AddSubtype per word
+///   - `<subject><copula> N/M`                                    → SetPower + SetToughness
 ///   - `<subject> power/toughness is half <copy source> power/toughness`
 ///     → SetPowerDynamic + SetToughnessDynamic using copied source values
 ///   - `<subject pronoun> has this ability`
 ///     → RetainPrintedTriggerFromSource or RetainPrintedAbilityFromSource
 ///     (when ctx provides the trigger or activated-ability index)
 ///   - `<subject pronoun> has ~'s other abilities`              → RetainAllOtherAbilitiesFromSource
-///   - `it's a(n) {core_type} in addition to its other types`  → AddType
-///   - `it's a(n) {subtype} in addition to its other types`    → AddSubtype
-///   - `is a(n) {core_type|subtype} in addition to its other types`
-///     (elided-subject form for non-leading bodies)            → AddType/AddSubtype
+///   - `it's a(n) {descriptor word list} in addition to its other [colors and ]types`
+///     → AddType/AddSubtype/AddSupertype per descriptor word, AddColor (marker
+///     names "colors and types") or SetColor (marker names only "types"),
+///     SetPower + SetToughness for an embedded N/M
+///   - `is a(n) {descriptor word list} in addition to its other types`
+///     (elided-subject form for non-leading bodies)            → same outputs
 ///   - `<possessive> starting loyalty is N`                    → SetStartingLoyalty
 ///   - `it has "<triggered/activated/static ability>"`         → GrantTrigger/GrantAbility/etc.
 ///   - `it has {keyword[, keyword, ...]}`                      → AddKeyword per kw
@@ -244,6 +258,9 @@ pub(crate) fn parse_except_body<'a>(
         return Some((rest, mods));
     }
     if let Some((rest, mods)) = parse_subject_pt_and_types(input) {
+        return Some((rest, mods));
+    }
+    if let Some((rest, mods)) = parse_subject_pt_only(input) {
         return Some((rest, mods));
     }
     if let Some((rest, modification)) = parse_has_source_other_abilities(input) {
@@ -276,8 +293,8 @@ pub(crate) fn parse_except_body<'a>(
     if let Some((rest, modifications)) = parse_its_a_single_core_type(input, card_name, ctx) {
         return Some((rest, modifications));
     }
-    if let Some((rest, subtype)) = parse_its_a_type_in_addition(input) {
-        return Some((rest, vec![subtype]));
+    if let Some((rest, modifications)) = parse_its_a_type_in_addition(input) {
+        return Some((rest, modifications));
     }
     if let Some((rest, modifications)) = parse_it_has_quoted_ability(input) {
         return Some((rest, modifications));
@@ -664,6 +681,53 @@ fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModifi
     Some((rest, mods))
 }
 
+/// CR 707.9b: `"<copy subject><copula> N/M"` — a copy exception whose body
+/// declares ONLY a power/toughness override, with no characteristic list
+/// (Quicksilver Gargantuan: "except it's 7/7"; Endless Evil: "except the token
+/// is 1/1"; Volrath, the Shapestealer: "except it's 7/5 and it has this
+/// ability"). CR 707.9b makes the overridden P/T part of the copy's COPIABLE
+/// values, which is why it belongs in `additional_modifications` and not in a
+/// later-layer pump.
+///
+/// The singular sibling [`parse_subject_pt_and_types`] requires the `"a "`
+/// article that introduces a characteristic list, so a bare `"it's 7/7"` body
+/// declined there and — before this arm existed — fell through the whole
+/// priority chain into `parse_except_clause`'s fail-soft skip, silently
+/// dropping the override on 14 printed faces that are coverage-green today.
+///
+/// Registered AFTER `parse_subject_pt_and_types` in [`parse_except_body`] so a
+/// body that DOES carry a type list (Lazotep Convert: "except it's a 4/4 black
+/// Zombie in addition to its other colors and types") is still claimed with its
+/// types. The two arms are independently disjoint as well: the with-types arm
+/// consumes `"a "` before the pair, which this arm never does.
+///
+/// CR 707.9a: the boundary `peek` is what keeps the arms disjoint in the other
+/// direction. An article-less type list ("it's 4/4 black Zombie") is REFUSED
+/// here rather than accepted with its type words silently discarded — the body
+/// must end at a body separator, a sentence terminator, or end of input.
+/// Subject and copula come from the shared axes, so `it`/`he`/`she`/`they`/
+/// `the token`/`the copy` and every apostrophe spelling are covered without
+/// enumerating their product.
+fn parse_subject_pt_only(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
+    let (rest, ()) = parse_copy_subject_and_copula(input).ok()?;
+    let (rest, (power, toughness)) = parse_pt_pair(rest)?;
+    peek(alt((
+        value((), eof),
+        value((), tag::<_, _, OracleError<'_>>(",")),
+        value((), tag(".")),
+        value((), tag(" and ")),
+    )))
+    .parse(rest)
+    .ok()?;
+    Some((
+        rest,
+        vec![
+            ContinuousModification::SetPower { value: power },
+            ContinuousModification::SetToughness { value: toughness },
+        ],
+    ))
+}
+
 /// CR 707.9b + CR 205.1b: Plural token-copy exception — "they're N/M {types}
 /// creature[s] in addition to their other types" (Astral Dragon, Project Image,
 /// Rebuild the City). Mirrors [`parse_subject_pt_and_types`], which is the
@@ -745,7 +809,11 @@ fn parse_theyre_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModific
 /// for color) vs per-color `AddColor`; `replace_types` selects whether an exact
 /// creature subtype REPLACES the copied creature types (via `RemoveAllSubtypes`
 /// plus `AddType { Creature }`) or is merely added. Color is applied at layer 5
-/// (CR 613.1e); type/subtype changes at layer 4 (CR 613.1d).
+/// (CR 613.1e); type/subtype changes at layer 4 (CR 613.1d). A `N/M` token
+/// inside the list (Absorbing Man: "a legendary 4/4 Human Villain creature in
+/// addition to his other types") is a CR 707.9b power/toughness override, not
+/// a type word — classified before the type/subtype arms below so it never
+/// reaches the subtype fallback.
 fn append_color_and_type_modifications(
     type_text: &str,
     replace_color: bool,
@@ -764,6 +832,22 @@ fn append_color_and_type_modifications(
                 if !colors.contains(&color) {
                     colors.push(color);
                 }
+                continue;
+            }
+        }
+        // CR 707.9b: a `N/M` token inside the descriptor list is a
+        // power/toughness override, not a type word (Absorbing Man: "he's a
+        // legendary 4/4 Human Villain creature in addition to his other
+        // types"). CR 707.9b makes the overridden values part of the copy's
+        // copiable values, exactly like the P/T the sibling arms parse out of
+        // the `<subject> is a N/M …` head, so the two paths emit the same
+        // variants. Mirror the `parse_color` arm's `rest.is_empty()` guard so a
+        // word that merely CONTAINS a slash is not claimed here and still
+        // reaches the subtype classifier below.
+        if let Some((rest, (power, toughness))) = parse_pt_pair(word) {
+            if rest.is_empty() {
+                mods.push(ContinuousModification::SetPower { value: power });
+                mods.push(ContinuousModification::SetToughness { value: toughness });
                 continue;
             }
         }
@@ -894,38 +978,31 @@ fn parse_has_this_ability<'a>(
     ))
 }
 
-/// CR 707.9b + CR 205.1b: suffix after the named type in additive copy-except
-/// bodies — covers both the generic "other types" and the creature-specific
-/// "other creature types" phrasing (Sakashima's Student class).
-fn split_in_addition_type_suffix(input: &str) -> Option<(&str, &str)> {
-    let in_addition_suffix = (
-        tag::<_, _, OracleError<'_>>(" in addition to "),
-        alt((tag("its"), tag("their"), tag("his"), tag("her"))),
-        tag(" other "),
-        opt(tag("creature ")),
-        tag("types"),
-    );
-    let (rest, (type_word, _)) = (take_until(" in addition to "), in_addition_suffix)
-        .parse(input)
-        .ok()?;
-    Some((type_word.trim(), rest))
-}
-
-/// CR 707.9b + CR 205.1b: "it's a(n) {type_word} in addition to its other
-/// types", plus the elided-subject form "is a(n) {type_word} in addition to
-/// its other types" used for non-leading bodies in a comma-anded copy-except
-/// list (the pronoun "it" is dropped and "'s" decontracts to "is").
-/// The type_word is either a core type (`"artifact"`, `"creature"`, ...) → `AddType`,
-/// or anything else → treated as a subtype and canonicalized → `AddSubtype`.
-fn parse_its_a_type_in_addition(input: &str) -> Option<(&str, ContinuousModification)> {
-    // CR 707.9b + CR 205.1b: "<copy subject> is a(n) <type> in addition to its
-    // other types". The subject/copula axes are shared, so this covers the
-    // leading contracted pronoun ("it's an artifact"), the spelled-out nominal
-    // subject (Tawnos, the Toymaker: "the copy is an artifact in addition to
-    // its other types"), and the elided-subject form used by non-leading bodies
-    // in a comma-anded list ("it isn't legendary, is an artifact in addition to
-    // its other types, and has myriad" — Auton Soldier on the BecomeCopy path,
-    // The Apprentice's Folly on the CopyTokenOf path).
+/// CR 707.9b + CR 205.1b: "it's a(n) {type word list} in addition to its
+/// other [colors and ][creature ]types", plus the elided-subject form "is
+/// a(n) {type word list} in addition to its other types" used for
+/// non-leading bodies in a comma-anded copy-except list (the pronoun "it" is
+/// dropped and "'s" decontracts to "is").
+///
+/// The type text is a WORD LIST (Synth Infiltrator: "a synth artifact
+/// creature"; Olag, Ludevic's Hubris: "a legendary blue and black zombie"),
+/// classified per word by [`append_color_and_type_modifications`] — the same
+/// shared classifier [`parse_theyre_pt_and_types`] uses — rather than folded
+/// into one fabricated multi-word subtype. Delegating the carve-out marker to
+/// [`split_in_addition_tail`] (the single authority [`parse_theyre_pt_and_types`]
+/// already uses) brings the CR 105.3 "colors and " axis in for the first time
+/// on this arm; the file's prior narrower `split_in_addition_type_suffix` did
+/// enumerate all four possessives, but did not know the colors axis.
+fn parse_its_a_type_in_addition(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
+    // CR 707.9b + CR 205.1b: "<copy subject> is a(n) <type word list> in
+    // addition to its other types". The subject/copula axes are shared, so
+    // this covers the leading contracted pronoun ("it's an artifact"), the
+    // spelled-out nominal subject (Tawnos, the Toymaker: "the copy is an
+    // artifact in addition to its other types"), and the elided-subject form
+    // used by non-leading bodies in a comma-anded list ("it isn't legendary,
+    // is an artifact in addition to its other types, and has myriad" —
+    // Auton Soldier on the BecomeCopy path, The Apprentice's Folly on the
+    // CopyTokenOf path).
     //
     // Reached only after `parse_its_a_type_loses_others` (parse_except_body)
     // declines, so the "and loses all other card types" replacement form is
@@ -937,19 +1014,50 @@ fn parse_its_a_type_in_addition(input: &str) -> Option<(&str, ContinuousModifica
     let (rest, _) = alt((tag::<_, _, OracleError<'_>>("an "), tag("a ")))
         .parse(rest)
         .ok()?;
-    let (type_word, rest) = split_in_addition_type_suffix(rest)?;
-    let type_word = type_word.trim();
-    if type_word.is_empty() {
+    // CR 205.1b: `animation::split_in_addition_tail` is the single authority for
+    // the "in addition to {its|their|his|her} other [colors and ][creature
+    // ]types" carve-out marker. `parse_theyre_pt_and_types` already delegates to
+    // it; routing this arm through the same authority is what brings the CR
+    // 105.3 colors axis in (the retired `split_in_addition_type_suffix` already
+    // covered all four possessives), and retires this file's second, narrower
+    // spelling of the same marker.
+    let (type_text, marker) = split_in_addition_tail(rest)?;
+    // Recover the position after the marker exactly the way `split_in_addition_tail`
+    // computes it — prefix length, then skip the separating whitespace — so the
+    // remainder handed back to `parse_except_clause`'s loop is exact. Identical
+    // arithmetic to the plural sibling.
+    let after_prefix = rest[type_text.len()..].trim_start();
+    let after_marker = &after_prefix[marker.len()..];
+    let type_text = type_text.trim();
+    if type_text.is_empty() {
         return None;
     }
-    // Try core type first (canonicalize capitalization before FromStr).
-    let canonical = canonicalize_subtype_name(type_word);
-    let modification = if let Ok(core_type) = CoreType::from_str(&canonical) {
-        ContinuousModification::AddType { core_type }
+    // CR 105.3: the marker itself carries the color axis when it reads "in
+    // addition to its other colors and types". Read it off the MATCHED MARKER,
+    // not off the whole body — a descriptor whose own words read "colors and"
+    // must not flip the axis. Same call the plural sibling makes.
+    let suffix = if nom_primitives::scan_contains(marker, "colors and ") {
+        AdditiveSuffix::ColorsAndTypes
     } else {
-        ContinuousModification::AddSubtype { subtype: canonical }
+        AdditiveSuffix::Types
     };
-    Some((rest, modification))
+    // CR 707.9d: derive the replace-vs-add axes from the carve-out. The marker's
+    // presence is itself the CR 205.1b type carve-out, so `replace_types` is
+    // never true on this arm; the color axis is the one the marker decides.
+    let (replace_color, replace_types) = match suffix {
+        AdditiveSuffix::None => (true, true),
+        AdditiveSuffix::Types => (true, false),
+        AdditiveSuffix::Colors => (false, true),
+        AdditiveSuffix::ColorsAndTypes => (false, false),
+    };
+    let mut mods = Vec::new();
+    append_color_and_type_modifications(type_text, replace_color, replace_types, &mut mods);
+    // CR 707.9a: a descriptor that produced nothing is not a body this arm can
+    // claim — decline so the fail-soft contract and the later arms still apply.
+    if mods.is_empty() {
+        return None;
+    }
+    Some((after_marker, mods))
 }
 
 /// CR 205.1a + CR 613.1d + CR 707.9d: "it's a(n) {type words} [with
@@ -2883,6 +2991,257 @@ mod tests {
                 ContinuousModification::SetColor { colors } if colors == &vec![ManaColor::Black]
             )),
             "color must REPLACE under the types-only carve-out; got {mods:?}"
+        );
+    }
+
+    /// Small local helper so the eight tests below read as one vector
+    /// assertion each rather than repeating the `parse_except_clause(...)
+    /// .unwrap().1` boilerplate.
+    fn mods_of(input: &str, card_name: &str) -> Vec<ContinuousModification> {
+        parse_except_clause(input, card_name, &ParseContext::default())
+            .unwrap()
+            .1
+    }
+
+    /// CR 707.9b: `parse_subject_pt_only` — Quicksilver Gargantuan's bare P/T
+    /// body, with no characteristic list. Base: the field is absent entirely
+    /// (`[]`); this arm is what lands it.
+    #[test]
+    fn except_bare_pt_body_sets_pt() {
+        assert_eq!(
+            mods_of(", except it's 7/7.", "Quicksilver Gargantuan"),
+            vec![
+                ContinuousModification::SetPower { value: 7 },
+                ContinuousModification::SetToughness { value: 7 },
+            ]
+        );
+    }
+
+    /// CR 707.9b: `parse_subject_pt_only`'s remainder proof — Hulkling, Young
+    /// Avenger's bare P/T body must hand the trailing ", and he has flying and
+    /// this ability." conjunct back to `parse_except_clause`'s loop rather
+    /// than swallowing it. Base: `[SetName, AddKeyword(Flying)]` — the P/T
+    /// override was silently dropped.
+    #[test]
+    fn except_bare_pt_body_leaves_following_conjunct_to_the_loop() {
+        assert_eq!(
+            mods_of(
+                ", except his name is ~, he's 4/4, and he has flying and this ability.",
+                "Hulkling, Young Avenger"
+            ),
+            vec![
+                ContinuousModification::SetName {
+                    name: "Hulkling, Young Avenger".to_string()
+                },
+                ContinuousModification::SetPower { value: 4 },
+                ContinuousModification::SetToughness { value: 4 },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying
+                },
+            ]
+        );
+    }
+
+    /// CR 707.9a: `parse_subject_pt_only`'s boundary `peek` declines an
+    /// article-less type list ("it's 4/4 black zombie") rather than accepting
+    /// it with the type words silently discarded — the with-types arms need
+    /// the `"a "` article. Paired positive: the bare `"it's 4/4"` body in the
+    /// same test still fires, so the negative cannot pass vacuously.
+    #[test]
+    fn except_bare_pt_body_declines_an_article_less_type_list() {
+        assert!(mods_of(", except it's 4/4 black zombie", "Card").is_empty());
+        assert_eq!(
+            mods_of(", except it's 4/4", "Card"),
+            vec![
+                ContinuousModification::SetPower { value: 4 },
+                ContinuousModification::SetToughness { value: 4 },
+            ]
+        );
+    }
+
+    /// CR 707.9b + CR 105.3 + CR 205.1b: Olag, Ludevic's Hubris — all three
+    /// `except` riders (name, P/T, and the "colors and types" descriptor
+    /// list) landed in order, with **no** `SetColor` (CR 105.3: the "colors
+    /// and" marker makes color additive). This is the test that binds Unit 1
+    /// and Unit 2 together. Base: the whole line is `Effect::Unimplemented`.
+    #[test]
+    fn except_multiword_descriptor_with_colors_and_types_axis() {
+        let mods = mods_of(
+            ", except its name is ~, it's 4/4, and it's a legendary blue and black zombie in addition to its other colors and types.",
+            "Olag, Ludevic's Hubris",
+        );
+        assert_eq!(
+            mods,
+            vec![
+                ContinuousModification::SetName {
+                    name: "Olag, Ludevic's Hubris".to_string()
+                },
+                ContinuousModification::SetPower { value: 4 },
+                ContinuousModification::SetToughness { value: 4 },
+                ContinuousModification::AddColor {
+                    color: ManaColor::Blue
+                },
+                ContinuousModification::AddColor {
+                    color: ManaColor::Black
+                },
+                ContinuousModification::AddSupertype {
+                    supertype: Supertype::Legendary
+                },
+                ContinuousModification::AddSubtype {
+                    subtype: "Zombie".to_string()
+                },
+            ]
+        );
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::SetColor { .. })),
+            "colors-and-types carve-out must ADD color, not replace; got {mods:?}"
+        );
+    }
+
+    /// CR 707.9b + CR 205.1b: `parse_its_a_type_in_addition`, generalized —
+    /// Synth Infiltrator's multi-word descriptor list splits into its core
+    /// types and subtype rather than collapsing into one fabricated subtype.
+    /// Base: `[AddSubtype("Synth Artifact Creature")]`.
+    #[test]
+    fn except_multiword_descriptor_splits_core_types_from_subtypes() {
+        assert_eq!(
+            mods_of(
+                ", except it's a synth artifact creature in addition to its other types.",
+                "Synth Infiltrator"
+            ),
+            vec![
+                ContinuousModification::AddSubtype {
+                    subtype: "Synth".to_string()
+                },
+                ContinuousModification::AddType {
+                    core_type: CoreType::Artifact
+                },
+                ContinuousModification::AddType {
+                    core_type: CoreType::Creature
+                },
+            ]
+        );
+    }
+
+    /// CR 707.9d: the opposite pole of the colors axis, on the same arm as
+    /// `except_multiword_descriptor_with_colors_and_types_axis` — a
+    /// types-only carve-out still REPLACES color (`SetColor`, no `AddColor`),
+    /// agreeing with the with-P/T sibling's
+    /// `additive_types_suffix_adds_subtype_but_replaces_color`. SHAPE test:
+    /// no printed card pairs a no-P/T body with a types-only carve-out and a
+    /// color word today; this pins the grammar axis in parity with its
+    /// measured siblings. Paired positive: this test's own
+    /// colors-and-types sibling asserts `AddColor` on the other side of the
+    /// same axis.
+    #[test]
+    fn except_multiword_descriptor_types_only_axis_replaces_color() {
+        let mods = mods_of(
+            ", except it's a blue zombie in addition to its other types",
+            "Card",
+        );
+        assert_eq!(
+            mods,
+            vec![
+                ContinuousModification::SetColor {
+                    colors: vec![ManaColor::Blue]
+                },
+                ContinuousModification::AddSubtype {
+                    subtype: "Zombie".to_string()
+                },
+            ]
+        );
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::AddColor { .. })),
+            "types-only carve-out must REPLACE color, not add; got {mods:?}"
+        );
+    }
+
+    /// CR 707.9b: Absorbing Man — a supertype word appears BEFORE a P/T
+    /// inside the descriptor list, and the `4/4` token must be classified as
+    /// a power/toughness override (the new word class in
+    /// `append_color_and_type_modifications`), not folded into a fabricated
+    /// subtype. Paired positive in the same clause: `SetName` and
+    /// `AddKeyword(Vigilance)` still parse from the surrounding bodies, so
+    /// the new word class cannot pass by eating the whole clause. Base:
+    /// `[SetName, AddSubtype("Legendary 4/4 Human Villain Creature"),
+    /// AddKeyword(Vigilance)]`.
+    #[test]
+    fn except_descriptor_list_with_embedded_pt() {
+        assert_eq!(
+            mods_of(
+                ", except his name is ~, he's a legendary 4/4 human villain creature in addition to his other types, and he has vigilance.",
+                "Absorbing Man",
+            ),
+            vec![
+                ContinuousModification::SetName {
+                    name: "Absorbing Man".to_string()
+                },
+                ContinuousModification::SetPower { value: 4 },
+                ContinuousModification::SetToughness { value: 4 },
+                ContinuousModification::AddSupertype {
+                    supertype: Supertype::Legendary
+                },
+                ContinuousModification::AddSubtype {
+                    subtype: "Human".to_string()
+                },
+                ContinuousModification::AddSubtype {
+                    subtype: "Villain".to_string()
+                },
+                ContinuousModification::AddType {
+                    core_type: CoreType::Creature
+                },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Vigilance
+                },
+            ]
+        );
+    }
+
+    /// CR 707.9a: the Matrix-row-10 fail-soft guard — Unit 2 must NOT widen
+    /// the claimed body set. Vesuvan Doppelganger's unreadable body is still
+    /// skipped (empty mods) rather than claimed; Fork's is still declined by
+    /// `split_except_clause`'s non-empty guard so `parse_target` never sees a
+    /// truncated head. Passes at base by design; complements (does not
+    /// replace) `unrecognised_body_does_not_block_others` and
+    /// `split_except_clause_declines_unreadable_body_but_accepts_readable_one`.
+    #[test]
+    fn except_unreadable_body_still_falls_through_fail_soft() {
+        assert!(mods_of(
+            ", except it doesn't copy that creature's color",
+            "Vesuvan Doppelganger"
+        )
+        .is_empty());
+        assert!(split_except_clause(
+            "Copy target instant or sorcery spell, except that the copy is red",
+            "copy target instant or sorcery spell, except that the copy is red",
+            "Fork",
+            &ParseContext::default()
+        )
+        .is_none());
+
+        // REACH GUARD for the negative directly above: the same head and the
+        // same `", except "` separator with a body the grammar CAN read must
+        // still split. Without it, `is_none()` would also be satisfied by a
+        // separator probe that never found the tail at all, making the
+        // fail-soft claim vacuous.
+        let readable = "Copy target instant or sorcery spell, except the copy isn't legendary";
+        let (head, mods) = split_except_clause(
+            readable,
+            &readable.to_lowercase(),
+            "Card",
+            &ParseContext::default(),
+        )
+        .expect("reach-guard: a readable body at the same separator must still split");
+        assert_eq!(head, "Copy target instant or sorcery spell");
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::RemoveSupertype {
+                supertype: Supertype::Legendary,
+            }]
         );
     }
 

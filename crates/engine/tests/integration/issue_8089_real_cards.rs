@@ -60,6 +60,33 @@ fn cephalid_facetaker_copy_expires_at_cleanup() {
     resolve_facetaker_combat_trigger(&mut runner, target);
     assert_eq!(runner.state().objects[&facetaker].name, "Facetaker Target");
 
+    // CR 707.9b: the copy exception's bare-P/T body ("except it's 1/4") is part
+    // of the copy's COPIABLE values, so the live copy is 1/4 and NOT the 5/5 it
+    // copied. Production-path discriminator for the `parse_subject_pt_only`
+    // arm: with that arm unregistered, the body is skipped fail-soft and the
+    // copy resolves as a plain copy at the copied creature's P/T.
+    //
+    // REACH GUARD: the name assertion directly above proves the copy effect is
+    // live (the object is "Facetaker Target", not "Cephalid Facetaker"), so a
+    // 1/4 read here cannot be the printed body of an uncopied Facetaker; and
+    // the copy source is a 5/5, so 1/4 can only come from the exception.
+    assert_eq!(
+        (
+            runner.state().objects[&target].power,
+            runner.state().objects[&target].toughness
+        ),
+        (Some(5), Some(5)),
+        "reach guard: the copied creature must really be a 5/5"
+    );
+    assert_eq!(
+        (
+            runner.state().objects[&facetaker].power,
+            runner.state().objects[&facetaker].toughness
+        ),
+        (Some(1), Some(4)),
+        "the live copy must take the exception's overridden 1/4, not the copied 5/5"
+    );
+
     execute_cleanup(runner.state_mut(), &mut Vec::new());
     flush_layers(runner.state_mut());
     assert_eq!(
