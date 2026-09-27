@@ -6739,9 +6739,15 @@ pub(crate) fn parse_mana_value_suffix(
     }
 
     let (rest, _) = parse_suffix_subject_head(trimmed).ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>("mana value ")
-        .parse(rest)
-        .ok()?;
+    // CR 202.3: "converted mana cost" is mana value under its former name, still
+    // printed in unmodernized Oracle text (M'Odo, the Gnarled Oracle; Underdark
+    // Beholder). Accepting it here keeps their bound instead of dropping it.
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("mana value "),
+        tag("converted mana cost "),
+    ))
+    .parse(rest)
+    .ok()?;
 
     // CR 202.3 + CR 120.3: Dynamic comparisons referencing the triggering event.
     // "that damage" → `EventContextAmount` (damage amount captured at trigger).
@@ -8287,9 +8293,112 @@ fn parse_cost_paid_object_reference<'a>(
     Ok((rest, TargetFilter::CostPaidObject))
 }
 
-pub(crate) fn parse_zone_changed_this_turn_suffix(
+/// CR 400.7: The origin zone named by a "put there from <zone>" provenance
+/// clause. Factored out of [`parse_zone_changed_this_turn_suffix`] so the
+/// affirmative form and the "anywhere other than" negated form below read the
+/// same zone vocabulary through one production instead of two lists that can
+/// drift apart.
+fn parse_zone_change_origin_zone(input: &str) -> nom::IResult<&str, Zone, OracleError<'_>> {
+    alt((
+        value(Zone::Battlefield, tag("the battlefield")),
+        value(Zone::Graveyard, tag("a graveyard")),
+        value(Zone::Graveyard, tag("your graveyard")),
+        value(Zone::Graveyard, tag("graveyard")),
+        value(Zone::Exile, tag("exile")),
+        value(Zone::Hand, tag("a hand")),
+        value(Zone::Hand, tag("your hand")),
+        value(Zone::Hand, tag("hand")),
+        value(Zone::Library, tag("a library")),
+        value(Zone::Library, tag("your library")),
+        value(Zone::Library, tag("library")),
+    ))
+    .parse(input)
+}
+
+/// CR 400.7: The "that (were|was) put there from …" provenance
+/// clause shared by the affirmative form ("… from your library this turn" —
+/// Kagha, Shadow Archdruid; The Fourteenth Doctor) and the negated form
+/// ("… from anywhere other than the battlefield this turn" — Banon, the
+/// Returners' Leader).
+///
+/// Returns the AND-combined properties the clause states, plus the number of
+/// bytes consumed. The negated form yields TWO properties rather than a lone
+/// `Not`, and both are load-bearing:
+///
+///   * `ZoneChangedThisTurn { from: None, to }` — the card must have arrived in
+///     `to` THIS TURN at all. Without it a card that has sat in the graveyard
+///     since an earlier turn satisfies the `Not` vacuously (it has no
+///     battlefield→graveyard record either), which would widen the printed
+///     "this turn" pool to the whole graveyard.
+///   * `Not(ZoneChangedThisTurn { from: Some(excluded), to })` — the origin
+///     exclusion itself, expressed through the existing general
+///     [`FilterProp::Not`] combinator rather than a negated-origin sibling.
+///
+/// `FilterProp::ZoneChangedThisTurn` reads the object's most recent zone-change
+/// record, so an earlier graveyard visit cannot qualify its current residency.
+pub(crate) fn parse_graveyard_pool_provenance_suffix(
     input: &str,
     to: Option<Zone>,
+) -> Option<(Vec<FilterProp>, usize)> {
+    let trimmed = input.trim_start();
+    let offset = input.len() - trimmed.len();
+
+    // The negated form is tried first — its "from anywhere other
+    // than " head strictly extends the affirmative "from " head, so the
+    // affirmative production would otherwise match the shorter prefix and leave
+    // "anywhere other than …" as an unconsumed residual.
+    let negated = (
+        tag::<_, _, OracleError<'_>>("that "),
+        alt((tag("were "), tag("was "))),
+        alt((tag("put "), tag("placed "), tag("moved "))),
+        tag("there from anywhere other than "),
+        parse_zone_change_origin_zone,
+        // REQUIRED here, unlike the affirmative production below, which keeps
+        // `opt` for compatibility with the shapes already shipping. Without a
+        // time limiter this production would narrow an unlimited exclusion
+        // ("put there from anywhere other than the battlefield", no "this
+        // turn") to a this-turn pool — under-permissive, and silently so. No
+        // printed card prints the unlimited form; requiring the limiter costs
+        // nothing today and refuses rather than guesses if one appears.
+        tag(" this turn"),
+    )
+        .map(|(_, _, _, _, excluded, _)| excluded)
+        .parse(trimmed);
+
+    if let Ok((rest, excluded)) = negated {
+        return Some((
+            vec![
+                FilterProp::ZoneChangedThisTurn { from: None, to },
+                FilterProp::Not {
+                    prop: Box::new(FilterProp::ZoneChangedThisTurn {
+                        from: Some(excluded),
+                        to,
+                    }),
+                },
+            ],
+            offset + trimmed.len() - rest.len(),
+        ));
+    }
+
+    // CR 400.7: the affirmative form, with the time phrase REQUIRED. The shared
+    // helper keeps `opt` for its existing callers, whose own grammars already
+    // bound the clause; here an omitted "this turn" would be silently narrowed
+    // to a this-turn pool by a `ZoneChangedThisTurn` result, so the pool path
+    // refuses instead and the shape stays an honest gap.
+    parse_zone_change_provenance(input, to, true).map(|(prop, consumed)| (vec![prop], consumed))
+}
+
+/// CR 400.7: the shared "that (were|was) put there from <zone> [this turn]"
+/// production.
+///
+/// `require_this_turn` is the one axis the two callers differ on, so the grammar
+/// is parameterized rather than duplicated: `parse_zone_changed_this_turn_suffix`
+/// passes `false` (preserving every shape already shipping), and the graveyard
+/// pool path passes `true`.
+fn parse_zone_change_provenance(
+    input: &str,
+    to: Option<Zone>,
+    require_this_turn: bool,
 ) -> Option<(FilterProp, usize)> {
     let trimmed = input.trim_start();
     let offset = input.len() - trimmed.len();
@@ -8298,24 +8407,16 @@ pub(crate) fn parse_zone_changed_this_turn_suffix(
         alt((tag("were "), tag("was "))),
         alt((tag("put "), tag("placed "), tag("moved "))),
         tag("there from "),
-        alt((
-            value(Zone::Battlefield, tag("the battlefield")),
-            value(Zone::Graveyard, tag("a graveyard")),
-            value(Zone::Graveyard, tag("your graveyard")),
-            value(Zone::Graveyard, tag("graveyard")),
-            value(Zone::Exile, tag("exile")),
-            value(Zone::Hand, tag("a hand")),
-            value(Zone::Hand, tag("your hand")),
-            value(Zone::Hand, tag("hand")),
-            value(Zone::Library, tag("a library")),
-            value(Zone::Library, tag("your library")),
-            value(Zone::Library, tag("library")),
-        )),
-        opt(tag(" this turn")),
+        parse_zone_change_origin_zone,
     )
-        .map(|(_, _, _, _, from, _)| from)
+        .map(|(_, _, _, _, from)| from)
         .parse(trimmed)
         .ok()?;
+    let rest = match tag::<_, _, OracleError<'_>>(" this turn").parse(rest) {
+        Ok((after, _)) => after,
+        Err(_) if require_this_turn => return None,
+        Err(_) => rest,
+    };
     Some((
         FilterProp::ZoneChangedThisTurn {
             from: Some(from),
@@ -8323,6 +8424,13 @@ pub(crate) fn parse_zone_changed_this_turn_suffix(
         },
         offset + trimmed.len() - rest.len(),
     ))
+}
+
+pub(crate) fn parse_zone_changed_this_turn_suffix(
+    input: &str,
+    to: Option<Zone>,
+) -> Option<(FilterProp, usize)> {
+    parse_zone_change_provenance(input, to, false)
 }
 
 fn zone_for_scope(props: &[FilterProp]) -> Option<Zone> {
@@ -10056,14 +10164,27 @@ enum ZoneQual {
 pub(crate) fn scan_zone_phrase(
     text: &str,
 ) -> Option<(Zone, Option<ControllerRef>, Vec<FilterProp>)> {
+    scan_zone_phrase_span(text).map(|(_span, zone, ctrl, props)| (zone, ctrl, props))
+}
+
+/// `scan_zone_phrase`, plus the matched phrase itself as a slice of `text` —
+/// for callers that must read the qualifier the phrase was parsed from rather
+/// than rescan the whole text for it.
+pub(crate) fn scan_zone_phrase_span(
+    text: &str,
+) -> Option<(&str, Zone, Option<ControllerRef>, Vec<FilterProp>)> {
     let mut offset = 0;
     while offset <= text.len() {
-        if let Some((props, ctrl, _consumed)) = parse_zone_suffix(&text[offset..]) {
+        if let Some((props, ctrl, consumed)) = parse_zone_suffix(&text[offset..]) {
             let zone = props.iter().find_map(|p| match p {
                 FilterProp::InZone { zone } => Some(*zone),
                 _ => None,
             })?;
-            return Some((zone, ctrl, props));
+            // `consumed` counts bytes of the lowercased phrase, so the span is exact
+            // only for text whose lowercase keeps its byte length (callers pass
+            // lowercased text); otherwise it may be empty.
+            let span = text[offset..].get(..consumed).unwrap_or_default();
+            return Some((span, zone, ctrl, props));
         }
         match text[offset..].find(' ') {
             Some(i) => offset += i + 1,

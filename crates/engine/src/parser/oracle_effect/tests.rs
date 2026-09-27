@@ -13,9 +13,10 @@ use crate::types::ability::CardPlayMode::{Cast, Play};
 use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
 use crate::types::ability::{
     AbilityUseTally, AttachSelection, AttachmentKind, CardSelectionMode, CastCostModifier,
-    CastManaObjectScope, CastManaSpentMetric, CommanderOwnership, DigRestOrder, ExcessRecipient,
-    ForEachCategoryAction, MassLibraryShuffleMode, ModalChoice, PerpetualModification, PileSource,
-    SeatDirection, TurnJournalKind, VoteTally, VoteVisibility, VoterScope,
+    CastManaObjectScope, CastManaSpentMetric, CommanderOwnership, CountBinding, DigRestOrder,
+    ExcessRecipient, ForEachCategoryAction, MassLibraryShuffleMode, ModalChoice,
+    PerpetualModification, PileSource, SeatDirection, TurnJournalKind, VoteTally, VoteVisibility,
+    VoterScope,
 };
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
@@ -4256,7 +4257,7 @@ fn normalize_verb_token_does_not_invent_stems_for_unknown_verbs() {
 ///
 /// Feeds the parser the un-tilde'd "named X" text the way production
 /// sees it after `normalize_card_name_refs`' `"named ~"` → `"named
-/// CardName"` restore (`oracle_util.rs:1553`). Asserting the literal
+/// CardName"` restore. Asserting the literal
 /// `FilterProp::Named { name }` value catches a regression in that
 /// restore step, which would otherwise produce `name: "~"` at parse
 /// time and silently mis-match against records whose `name` is the
@@ -19457,6 +19458,7 @@ fn exile_top_of_your_library_parses_as_exile_top() {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "Expected ExileTop(controller, 1), got {:?}",
@@ -19480,6 +19482,7 @@ fn exile_top_card_of_your_library_face_down_parses_with_face_down_true() {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
                 face_down: true,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "Expected ExileTop(controller, 1, face_down=true), got {:?}",
@@ -19507,6 +19510,7 @@ fn exile_card_from_top_of_your_library_face_down_for_each_opponent() {
                 },
                 position: LibraryPosition::Top,
                 face_down: true,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "Expected ExileTop(controller, opponents, face_down), got {:?}",
@@ -19529,6 +19533,7 @@ fn exile_top_target_opponents_library() {
             count,
             position: LibraryPosition::Top,
             face_down,
+            actor: _,
         } => {
             assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
             assert!(!*face_down);
@@ -19557,6 +19562,7 @@ fn exile_top_target_players_library_singular() {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "Expected ExileTop(Player, 1, face_down=false), got {:?}",
@@ -19585,6 +19591,7 @@ fn gonti_night_minister_look_and_exile_face_down_fuses_to_exile_top() {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
                 face_down: true,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "expected fused look-and-exile to lower to ExileTop, got {:?}",
@@ -19628,6 +19635,7 @@ fn look_at_top_then_exile_it_face_down_rewrites_dig_to_exile_top() {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
                 face_down: true,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "Expected the look-then-exile idiom to lower to a face-down ExileTop, got {:?}",
@@ -19702,6 +19710,7 @@ fn exile_top_then_free_play_that_card_binds_cast_to_tracked_set() {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "expected a controller ExileTop head, got {:?}",
@@ -19753,6 +19762,7 @@ fn abbot_of_keral_keep_paid_impulse_grant_unchanged() {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "expected a controller ExileTop head, got {:?}",
@@ -25817,6 +25827,7 @@ fn exiled_cause_publishers_all_stamp_exiled_at_runtime() {
             count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Top,
             face_down: false,
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
         },
     ];
     for effect in &direct_publishers {
@@ -25929,6 +25940,7 @@ fn exiled_cause_publishers_all_stamp_exiled_at_runtime() {
             matched_disposition: RevealUntilDisposition::RevealOnly,
             kept_destination: Zone::Exile,
             rest_destination: Zone::Library,
+            rest_order: DigRestOrder::Preserve,
             enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
             kept_optional_to: None,
@@ -26709,6 +26721,8 @@ fn mill_then_draw_equal_to_milled_card_mana_value() {
     }
 }
 
+/// With the conjunct cut off, the grant lowers like its rider-less form:
+/// "that card" names the tracked set.
 #[test]
 fn parse_play_from_exile_while_exiled_with_any_mana_permission() {
     let def = parse_effect_chain(
@@ -26723,7 +26737,9 @@ fn parse_play_from_exile_while_exiled_with_any_mana_permission() {
                 mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
                 ..
             },
-            target: TargetFilter::Any,
+            target: TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            },
             ..
         }
     ));
@@ -26760,7 +26776,7 @@ fn parse_play_from_exile_while_exiled_with_spend_mana_as_any_color_permission() 
             Effect::GrantCastingPermission {
                 permission: CastingPermission::PlayFromExile {
                     duration: Duration::Permanent,
-                    mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                    mana_spend_permission: Some(ManaSpendPermission::AnyColor),
                     ..
                 },
                 ..
@@ -26785,7 +26801,7 @@ fn parse_brainstealer_dragon_play_grant_folds_mana_rider() {
         Effect::GrantCastingPermission {
             permission: CastingPermission::PlayFromExile {
                 duration: Duration::Permanent,
-                mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                mana_spend_permission: Some(ManaSpendPermission::AnyColor),
                 ..
             },
             target: TargetFilter::TrackedSet { .. },
@@ -26886,6 +26902,7 @@ fn parse_impulse_draw_chain_next_turn() {
                 count: QuantityExpr::Fixed { value: 2 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "Expected ExileTop(controller, 2), got {:?}",
@@ -26931,6 +26948,7 @@ fn escape_to_the_wilds_play_clause() {
                 count: QuantityExpr::Fixed { value: 5 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "Expected ExileTop(Controller, 5), got {:?}",
@@ -27270,6 +27288,7 @@ fn parse_impulse_draw_chain() {
                 count: QuantityExpr::Fixed { value: 2 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "Expected ExileTop(controller, 2), got {:?}",
@@ -27438,6 +27457,7 @@ fn exile_top_x_cards_of_your_library() {
                 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             } if name == "X"
         ),
         "Expected ExileTop(controller, X), got {:?}",
@@ -27465,6 +27485,7 @@ fn exile_top_x_cards_with_where_x_card_types_among_other_nonland_permanents() {
             },
         position: LibraryPosition::Top,
         face_down: false,
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
     } = &*def.effect
     else {
         panic!(
@@ -27511,6 +27532,7 @@ fn jeleva_etb_each_player_exiles_top_x_resolves_to_mana_spent_to_cast() {
             },
         position: LibraryPosition::Top,
         face_down: false,
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
     } = &*def.effect
     else {
         panic!(
@@ -27547,6 +27569,7 @@ fn exile_top_card_of_that_players_library_uses_parent_target() {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "Expected ExileTop(parent target, 1), got {:?}",
@@ -28410,6 +28433,7 @@ fn defending_player_exiles_top_twenty_cards() {
                 count: QuantityExpr::Fixed { value: 20 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
             }
         ),
         "Expected ExileTop(DefendingPlayer, 20), got {:?}",
@@ -28429,6 +28453,7 @@ fn target_opponent_exiles_top_half_library() {
             count,
             position: LibraryPosition::Top,
             face_down: _,
+            actor: _,
         } => {
             assert!(
                 matches!(player, TargetFilter::Typed(tf) if tf.controller == Some(ControllerRef::Opponent)),
@@ -28638,6 +28663,8 @@ fn cut_your_losses_mill_half_their_library_rounded_down() {
                     inner: Box::new(QuantityExpr::Ref {
                         qty: QuantityRef::TargetZoneCardCount {
                             zone: ZoneRef::Library,
+                            scope: ControllerRef::TargetPlayer,
+                            binding: CountBinding::Anaphoric,
                         },
                     }),
                     divisor: 2,
@@ -34696,7 +34723,9 @@ fn parse_quantity_comparison_greater_than_dynamic() {
     assert!(matches!(
         rhs,
         QuantityExpr::Ref {
-            qty: QuantityRef::StartingLifeTotal
+            qty: QuantityRef::StartingLifeTotal {
+                player: PlayerScope::Controller,
+            }
         }
     ));
 }
@@ -34738,7 +34767,9 @@ fn parse_condition_text_life_greater_than_starting() {
             },
             comparator: Comparator::GT,
             rhs: QuantityExpr::Ref {
-                qty: QuantityRef::StartingLifeTotal
+                qty: QuantityRef::StartingLifeTotal {
+                    player: PlayerScope::Controller,
+                }
             },
         }
     ));
@@ -40454,6 +40485,65 @@ fn reveal_until_puts_those_cards_to_graveyard() {
     );
 }
 
+/// CR 701.20a: Treasure Hunt — "then put all cards revealed this way into your hand."
+/// The entire revealed pile goes to hand (kept_destination=Hand, rest_destination=Hand).
+#[test]
+fn reveal_until_put_all_cards_revealed_this_way_into_hand() {
+    let def = parse_effect_chain(
+        "Reveal cards from the top of your library until you reveal a nonland card, then put all cards revealed this way into your hand.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil {
+        kept_destination,
+        rest_destination,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    assert_eq!(*kept_destination, Zone::Hand);
+    assert_eq!(*rest_destination, Zone::Hand);
+}
+
+/// CR 701.20a: Goblin Charbelcher tail — "Put the revealed cards on the bottom of your library in any order."
+/// Both matching and non-matching cards go to the library bottom.
+#[test]
+fn reveal_until_put_the_revealed_cards_on_bottom_of_library() {
+    let def = parse_effect_chain(
+        "Reveal cards from the top of your library until you reveal a land card. Put the revealed cards on the bottom of your library in any order.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil {
+        kept_destination,
+        rest_destination,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    assert_eq!(*kept_destination, Zone::Library);
+    assert_eq!(*rest_destination, Zone::Library);
+}
+
+/// CR 701.20a: All revealed cards into exile.
+#[test]
+fn reveal_until_put_all_cards_revealed_this_way_into_exile() {
+    let def = parse_effect_chain(
+        "Reveal cards from the top of your library until you reveal a land card, then put all cards revealed this way into exile.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil {
+        kept_destination,
+        rest_destination,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    assert_eq!(*kept_destination, Zone::Exile);
+    assert_eq!(*rest_destination, Zone::Exile);
+}
+
 /// CR 701.20a: Polymorph end-to-end — "Its controller reveals cards from
 /// the top of their library until they reveal a creature card. The player
 /// puts that card onto the battlefield, then shuffles all other cards
@@ -40552,6 +40642,7 @@ fn reveal_until_ring_goes_south_land_cards_to_battlefield_tapped() {
                 filter: TargetFilter::Typed(TypedFilter { type_filters, .. }),
                 kept_destination: Zone::Battlefield,
                 rest_destination: Zone::Library,
+                rest_order: crate::types::ability::DigRestOrder::Random,
                 enter_tapped: crate::types::zones::EtbTapState::Tapped,
                 enters_attacking: false,
                 ..
@@ -41317,6 +41408,173 @@ fn reveal_until_rest_pile_after_intervening_damage_is_absorbed() {
     );
 }
 
+/// CR 701.20a + CR 608.2c + CR 401.4: Erratic Mutation has a pump instruction between
+/// the RevealUntil and "Put all cards revealed this way on the bottom of your library in any order."
+/// The entire revealed pile (matching nonland card + preceding lands) goes to the bottom of the library
+/// (kept_destination=Library, rest_destination=Library); CR 401.4 lets its owner arrange that pile.
+/// The placement clause must be absorbed into
+/// RevealUntil, NOT emitted as a trailing PutAtLibraryPosition sibling that prompts for a second target.
+#[test]
+fn reveal_until_all_cards_revealed_this_way_erratic_mutation() {
+    let def = parse_effect_chain(
+        "Choose target creature. Reveal cards from the top of your library until you reveal a nonland card. \
+         That creature gets +X/-X until end of turn, where X is that card's mana value. \
+         Put all cards revealed this way on the bottom of your library in any order.",
+        AbilityKind::Spell,
+    );
+
+    let Effect::TargetOnly { ref target } = *def.effect else {
+        panic!("expected TargetOnly head, got {:?}", def.effect);
+    };
+    assert_eq!(*target, TargetFilter::Typed(TypedFilter::creature()));
+
+    let reveal = def
+        .sub_ability
+        .as_ref()
+        .expect("TargetOnly head must chain into RevealUntil");
+    let Effect::RevealUntil {
+        kept_destination,
+        rest_destination,
+        rest_order,
+        ..
+    } = &*reveal.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", reveal.effect);
+    };
+    assert_eq!(*kept_destination, Zone::Library);
+    assert_eq!(*rest_destination, Zone::Library);
+    assert_eq!(*rest_order, DigRestOrder::PlayerChoice);
+
+    let pump = reveal
+        .sub_ability
+        .as_ref()
+        .expect("RevealUntil must chain into pump");
+    let Effect::Pump {
+        target: ref pump_target,
+        power,
+        toughness,
+        ..
+    } = &*pump.effect
+    else {
+        panic!("expected Pump, got {:?}", pump.effect);
+    };
+    assert_eq!(*pump_target, TargetFilter::ParentTarget);
+    assert_eq!(
+        *power,
+        PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Demonstrative,
+            }
+        })
+    );
+    assert_eq!(
+        *toughness,
+        PtValue::Quantity(QuantityExpr::Multiply {
+            factor: -1,
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Demonstrative,
+                }
+            }),
+        })
+    );
+    assert!(
+        pump.sub_ability.is_none(),
+        "all-revealed-cards placement must be absorbed by RevealUntil, not emitted as {:?}",
+        pump.sub_ability
+    );
+}
+
+/// CR 701.24a: A trailing shuffle instruction after RevealUntil must be emitted
+/// as a distinct Effect::Shuffle, not swallowed into PutRest (The Crimson Avenger,
+/// Underdark Beholder).
+#[test]
+fn reveal_until_followed_by_shuffle_emits_distinct_shuffle() {
+    let def = parse_effect_chain(
+        "Reveal cards from the top of your library until you reveal a nonland card. \
+         Cast that card without paying its mana cost. Then shuffle your library.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil { .. } = &*def.effect else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    let cast = def
+        .sub_ability
+        .as_ref()
+        .expect("RevealUntil must chain into Cast");
+    let shuffle = cast
+        .sub_ability
+        .as_ref()
+        .expect("Cast must chain into Shuffle");
+    assert!(
+        matches!(&*shuffle.effect, Effect::Shuffle { .. }),
+        "expected trailing Effect::Shuffle, got {:?}",
+        shuffle.effect
+    );
+}
+
+/// CR 401.4: unspecified order gives the owner a choice only for library placement.
+#[test]
+fn reveal_until_all_cards_unspecified_order_matches_destination() {
+    for (placement, destination, expected_order) in [
+        (
+            "on the bottom of your library",
+            Zone::Library,
+            DigRestOrder::PlayerChoice,
+        ),
+        (
+            "into your library",
+            Zone::Library,
+            DigRestOrder::PlayerChoice,
+        ),
+        ("into your hand", Zone::Hand, DigRestOrder::Preserve),
+        (
+            "into your graveyard",
+            Zone::Graveyard,
+            DigRestOrder::Preserve,
+        ),
+        ("into exile", Zone::Exile, DigRestOrder::Preserve),
+    ] {
+        let def = parse_effect_chain(
+            &format!("Reveal cards from the top of your library until you reveal a nonland card. Put all cards revealed this way {placement}."),
+            AbilityKind::Spell,
+        );
+        let Effect::RevealUntil {
+            kept_destination,
+            rest_destination,
+            rest_order,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected RevealUntil for {placement}, got {:?}", def.effect);
+        };
+        assert_eq!(*kept_destination, destination, "{placement}");
+        assert_eq!(*rest_destination, destination, "{placement}");
+        assert_eq!(*rest_order, expected_order, "{placement}");
+    }
+}
+
+/// CR 701.20a: All cards revealed on the bottom in a random order.
+#[test]
+fn reveal_until_all_cards_revealed_this_way_random_order() {
+    let def = parse_effect_chain(
+        "Reveal cards from the top of your library until you reveal a nonland card. Put all cards revealed this way on the bottom of your library in a random order.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil {
+        kept_destination,
+        rest_destination,
+        rest_order,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    assert_eq!(*kept_destination, Zone::Library);
+    assert_eq!(*rest_destination, Zone::Library);
+    assert_eq!(*rest_order, DigRestOrder::Random);
+}
+
 /// CR 701.20a: "reveal until you reveal X nonland cards, where X is the
 /// number of colors among permanents you control" (Sanar core). The
 /// per-color exile + cast-this-turn tail is intentionally NOT yet parsed; the
@@ -41651,8 +41909,8 @@ fn leading_conditional_accepts_the_then_if_connector() {
     );
 }
 
-/// V13 — a non-rider EVENT body gaps rather than lowering. At `PHASE_BASE_SHA` the
-/// guard was dropped and `Effect::PreventDamage` was emitted unconditionally.
+/// V13 — a non-rider EVENT body gaps rather than lowering. Without the guard,
+/// `Effect::PreventDamage` is emitted unconditionally.
 ///
 /// No terminating period: `push_clause_chunk` strips one before the seam sees the text,
 /// so a fixture ending in `.` cannot produce a byte-equal description. Do not weaken
@@ -41714,6 +41972,28 @@ fn unlowerable_event_guard_re_records_over_the_full_clause() {
                 .to_string()
         },
         "V18: the antecedent must be recoverable from the recorded text"
+    );
+}
+
+/// CR 614.1a: a chain-position windowed graveyard redirect lowers through the
+/// whole-body authority instead of gapping. Magus of the Will's one-line
+/// activated body never reaches the line-level replacement dispatcher, so this
+/// sentence arrived at the Event-guard seam as an
+/// `Unimplemented("unparsed_replacement")` stub while the identical sentence on
+/// its own line lowered — and the runtime replacement never installed.
+#[test]
+fn chain_position_windowed_graveyard_redirect_lowers() {
+    let def = parse_effect_chain(
+        "If a card would be put into your graveyard from anywhere this turn, exile that card instead.",
+        AbilityKind::Activated,
+    );
+    assert!(
+        chain_has_add_target_replacement(&def),
+        "chain-position graveyard redirect must lower to AddTargetReplacement: {def:?}"
+    );
+    assert!(
+        !chain_has_unimplemented(&def),
+        "no Unimplemented clause may remain: {def:?}"
     );
 }
 
@@ -42773,6 +43053,32 @@ fn perpetual_grant_ability_rejects_unsupported_triggered_body() {
     assert!(
         matches!(e, Effect::Unimplemented { .. }),
         "an unsupported (triggered-ability) quoted grant must fail closed, got {e:?}"
+    );
+}
+
+/// Fail-closed pin for `PerpetualGrantModification::try_from`'s
+/// `GenericEffect`-static arm: a quoted body that lowers to a resolution-time
+/// `GenericEffect` with statics is a continuous-effect grant the perpetual
+/// installer cannot route, so the whole clause fails closed.
+#[test]
+fn perpetual_grant_ability_rejects_resolution_time_generic_effect_body() {
+    let body = "Until end of turn, creatures you control gain flying.";
+    let classified = crate::parser::oracle_static::classify_quoted_inner(body);
+    assert!(
+        classified.iter().any(|m| matches!(
+            m,
+            ContinuousModification::GrantAbility { definition }
+                if crate::game::coverage::ability_tree_any(definition, &|d| matches!(
+                    &*d.effect,
+                    Effect::GenericEffect { static_abilities, .. } if !static_abilities.is_empty()
+                ))
+        )),
+        "reach guard: the body lowers to a GenericEffect with statics: {classified:?}"
+    );
+    let e = parse_effect(&format!("~ perpetually gains \"{body}\""));
+    assert!(
+        matches!(e, Effect::Unimplemented { .. }),
+        "a resolution-time GenericEffect grant must fail closed, got {e:?}"
     );
 }
 
@@ -48631,6 +48937,7 @@ fn parser_shape_evelyn_exiles_each_library_with_collection_counter_and_permissio
         count: QuantityExpr::Fixed { value: 1 },
         position: LibraryPosition::Top,
         face_down: false,
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
     } = *def.effect
     else {
         panic!("expected all-player ExileTop, got {:?}", def.effect);
@@ -48675,10 +48982,7 @@ fn parser_shape_evelyn_exiles_each_library_with_collection_counter_and_permissio
     };
     assert_eq!(*frequency, CastFrequency::OncePerTurn);
     assert_eq!(*mode, CardPlayMode::Play);
-    assert_eq!(
-        *mana_spend_permission,
-        Some(ManaSpendPermission::AnyTypeOrColor)
-    );
+    assert_eq!(*mana_spend_permission, Some(ManaSpendPermission::AnyColor));
     assert_eq!(
         target,
         &TargetFilter::TrackedSet {
@@ -49215,7 +49519,7 @@ fn counted_exiled_this_way_cast_cap_the_window_cannot_represent_is_refused() {
 /// The refusal is STRUCTURAL at the construction seam, not only at the door.
 ///
 /// `from_among_batch_cast_driver` is the shared driver authority for all four
-/// `from among` arms. It must answer `None` for an unrepresentable printed cap
+/// `from among` arms. It must answer `Refused` for an unrepresentable printed cap
 /// on EVERY driver axis — free/`Cast` (which would otherwise pick
 /// `ResolutionWindow`), paid, land-play, and duration-bearing (which would
 /// otherwise pick `LingeringPermission`) — so that no reordering of the arms,
@@ -49234,21 +49538,21 @@ fn from_among_batch_cast_driver_refuses_an_unrepresentable_cap_on_every_axis() {
     // Representable bounds still pick their established drivers.
     assert!(
         matches!(
-            from_among_batch_cast_driver(Cast, true, free_ok),
-            Some(CastFromZoneDriver::ResolutionWindow { bounds })
+            lowering_without_stated_duration(Cast, true, free_ok),
+            FromAmongBatchLowering::Driver(CastFromZoneDriver::ResolutionWindow { bounds })
                 if bounds.max_casts == Some(2)
         ),
         "reach guard: the free, no-duration axis must still build a bounded window"
     );
     assert_eq!(
-        from_among_batch_cast_driver(Cast, true, durational_ok),
-        Some(LingeringPermission),
+        lowering_without_stated_duration(Cast, true, durational_ok),
+        FromAmongBatchLowering::Driver(LingeringPermission),
         "reach guard: a stated duration over an UNBOUNDED batch must still keep \
          the lingering grant"
     );
     assert_eq!(
-        from_among_batch_cast_driver(Cast, false, paid_ok),
-        Some(LingeringPermission),
+        lowering_without_stated_duration(Cast, false, paid_ok),
+        FromAmongBatchLowering::Driver(LingeringPermission),
         "reach guard: a paid UNBOUNDED batch cast must still keep the lingering grant"
     );
 
@@ -49260,12 +49564,47 @@ fn from_among_batch_cast_driver_refuses_an_unrepresentable_cap_on_every_axis() {
         ("land play", paid, Play, false),
     ] {
         assert_eq!(
-            from_among_batch_cast_driver(mode, without_paying, rest),
-            None,
+            lowering_without_stated_duration(mode, without_paying, rest),
+            FromAmongBatchLowering::Refused,
             "{label}: an unrepresentable printed cap must refuse, never downgrade \
              to a driver with no count channel"
         );
+        // And a STATED duration does not buy an unrepresentable cap a
+        // promotion either — `single_use` is a budget of ONE, not of `N`.
+        assert_eq!(
+            lowering_with_stated_duration(mode, without_paying, rest),
+            FromAmongBatchLowering::Refused,
+            "{label}: an unrepresentable printed cap must still refuse WITH a \
+             stated duration — the single-use grant carries a cap of one only"
+        );
     }
+}
+
+/// The two ways the `from among` mechanism authority is asked, spelled out so no
+/// row can silently pick up the other's answer.
+///
+/// `ParseContext::stated_clause_duration` carries a duration the positional strip
+/// seams peeled before the body parse — the fact that separates Locke, Treasure
+/// Hunter from Nathan Drake, Treasure Hunter, which are byte-identical at this
+/// point (see the field's own documentation).
+fn lowering_without_stated_duration(
+    mode: CardPlayMode,
+    without_paying: bool,
+    rest: &str,
+) -> FromAmongBatchLowering {
+    from_among_batch_cast_driver(mode, without_paying, rest, &ParseContext::default())
+}
+
+fn lowering_with_stated_duration(
+    mode: CardPlayMode,
+    without_paying: bool,
+    rest: &str,
+) -> FromAmongBatchLowering {
+    let ctx = ParseContext {
+        stated_clause_duration: Some(Duration::UntilEndOfTurn),
+        ..Default::default()
+    };
+    from_among_batch_cast_driver(mode, without_paying, rest, &ctx)
 }
 
 /// CR 608.2c: a printed `"up to N"` that reaches the TAIL branches — the ones
@@ -49361,38 +49700,54 @@ fn a_printed_cap_reaching_the_tail_branches_is_refused() {
 ///
 /// Each refusing row is paired with the SAME axis carrying an unbounded head, so
 /// no row can pass merely because that axis stopped producing a driver at all.
+///
+/// Every row here states NO duration. A cap of exactly one paired with a STATED
+/// duration is the one combination that is no longer refused — it promotes to the
+/// single-use grant — and that split is pinned by
+/// `a_stated_duration_promotes_a_paid_cap_of_one_to_a_single_use_grant`.
 #[test]
 fn from_among_batch_cast_driver_refuses_a_representable_cap_no_mechanism_can_carry() {
     // Sanwell, Avenger Ace (verbatim clause body): a PAID batch cast printing a
     // singular head noun. Six cards are exiled and exactly one may be cast; the
-    // lingering permission granted every matching one of the six.
+    // lingering permission granted every matching one of the six. CR 608.2g: it
+    // states no duration, so it has no later priority window and must NOT become
+    // a lingering grant of any kind — including the single-use one.
     assert_eq!(
-        from_among_batch_cast_driver(
+        lowering_without_stated_duration(
             Cast,
             false,
             "a vehicle or artifact creature spell from among them"
         ),
-        None,
+        FromAmongBatchLowering::Refused,
         "a paid batch cast printing a cap of one must refuse: the per-object \
          permission it would select cannot stop the second cast"
     );
-    // Chiss-Goria, Forge Tyrant (verbatim clause body): paid, capped, and
-    // duration-bearing at once.
+    // Paid, capped, and carrying a duration the fragment still holds — the
+    // mid-clause position no strip seam peels. NOT Chiss-Goria's real path: its
+    // trailing "this turn" is peeled by `strip_trailing_duration` before the body
+    // parse and arrives through `ParseContext::stated_clause_duration` instead
+    // (measured; see the promotion test). This row pins the mid-clause axis,
+    // where the duration is visible but the promotion is declined because the
+    // duration the grant would need was never peeled into the context.
     assert_eq!(
-        from_among_batch_cast_driver(Cast, false, "an artifact spell from among them this turn"),
-        None,
+        lowering_without_stated_duration(
+            Cast,
+            false,
+            "an artifact spell from among them this turn"
+        ),
+        FromAmongBatchLowering::Refused,
         "a paid, duration-bearing capped batch cast must refuse"
     );
     // The free duration-bearing axis in isolation (Ral, Leyline Prodigy's
     // mid-clause "this turn" shape, given a printed cap): the duration selects
     // the lingering mechanism, which still cannot hold the cap.
     assert_eq!(
-        from_among_batch_cast_driver(
+        lowering_without_stated_duration(
             Cast,
             true,
             "up to two spells from among them this turn without paying their mana costs"
         ),
-        None,
+        FromAmongBatchLowering::Refused,
         "a free but duration-bearing capped batch cast must refuse"
     );
     // CR 202.3: the running-total budget is a bound with no lingering channel
@@ -49400,18 +49755,18 @@ fn from_among_batch_cast_driver_refuses_a_representable_cap_no_mechanism_can_car
     // threaded only `max_casts` would leave this row granting an unbudgeted
     // permission.
     assert_eq!(
-        from_among_batch_cast_driver(
+        lowering_without_stated_duration(
             Cast,
             true,
             "spells with total mana value 10 or less from among them this turn without paying their mana costs"
         ),
-        None,
+        FromAmongBatchLowering::Refused,
         "a duration-bearing CR 202.3 running-total budget must refuse too"
     );
     // CR 305.1: the land-play axis has no during-resolution mechanism at all.
     assert_eq!(
-        from_among_batch_cast_driver(Play, false, "a land from among them"),
-        None,
+        lowering_without_stated_duration(Play, false, "a land from among them"),
+        FromAmongBatchLowering::Refused,
         "a capped land play must refuse"
     );
 
@@ -49440,12 +49795,103 @@ fn from_among_batch_cast_driver_refuses_a_representable_cap_no_mechanism_can_car
         ("land play", "lands from among them", Play, false),
     ] {
         assert_eq!(
-            from_among_batch_cast_driver(mode, without_paying, rest),
-            Some(LingeringPermission),
+            lowering_without_stated_duration(mode, without_paying, rest),
+            FromAmongBatchLowering::Driver(LingeringPermission),
             "reach guard ({label}): an unbounded head on this axis must still \
              build the lingering grant"
         );
     }
+}
+
+/// CR 601.2a + CR 611.2a + CR 608.2g: a PAID cap of exactly one, with a duration
+/// the strip seams peeled, promotes to the single-use grant instead of refusing.
+///
+/// This is the whole discriminator, asserted on both sides. Locke, Treasure
+/// Hunter and Nathan Drake, Treasure Hunter print the SAME clause body and arrive
+/// here byte-identical (`"a spell from among those cards"`); the only thing that
+/// separates them is whether a duration was peeled off an edge of the clause.
+/// CR 608.2g makes that separation a rules requirement, not a preference: a
+/// resolving object "continues to resolve, which may include casting other spells
+/// this way" and "no other spells can normally be cast … during resolution", so a
+/// clause stating no duration has no later priority window in which a lingering
+/// permission could be exercised.
+#[test]
+fn a_stated_duration_promotes_a_paid_cap_of_one_to_a_single_use_grant() {
+    // Locke, Treasure Hunter — "Until end of turn, you may cast a spell from
+    // among those cards" (leading duration, peeled by the chunk expansion).
+    let locke = "a spell from among those cards";
+    // Chiss-Goria, Forge Tyrant — "You may cast an artifact spell from among them
+    // this turn" (trailing duration, peeled by `strip_trailing_duration`).
+    let chiss_goria = "an artifact spell from among them";
+    // Sanwell, Avenger Ace — same grammar, no duration at any position.
+    let sanwell = "a vehicle or artifact creature spell from among them";
+
+    for (label, rest) in [("locke", locke), ("chiss-goria", chiss_goria)] {
+        assert_eq!(
+            lowering_with_stated_duration(Cast, false, rest),
+            FromAmongBatchLowering::SingleUseGrant,
+            "{label}: a paid cap of one WITH a stated duration is the single-use \
+             grant, not a refusal"
+        );
+        // DISCRIMINATING: the identical fragment without the peeled duration is
+        // Nathan Drake / Sanwell, and CR 608.2g forbids the lingering grant.
+        assert_eq!(
+            lowering_without_stated_duration(Cast, false, rest),
+            FromAmongBatchLowering::Refused,
+            "{label}: the SAME fragment with no stated duration must still refuse \
+             — this is the only thing separating Locke from Nathan Drake"
+        );
+    }
+    assert_eq!(
+        lowering_without_stated_duration(Cast, false, sanwell),
+        FromAmongBatchLowering::Refused,
+        "Sanwell states no duration and must keep its CR 608.2g refusal"
+    );
+
+    // CR 118.9: a FREE cap of one must NOT promote. `PlayFromExile` has no
+    // free-cast channel, so the promotion would silently make the player pay.
+    // MEASURED, and not the obvious shape: a free clause never reaches the
+    // promotion at all, because `clause_states_a_duration` reads the FRAGMENT and
+    // the peeled duration is not in it — so the mechanism is still
+    // `ResolutionWindow`, which carries a cap of one perfectly well. Aminatou's
+    // Augury's refusal therefore happens LATER, at the duration seam
+    // (`CastFromZoneDriver::with_lingering_duration` → `CAST_BOUND_LOST_TO_DURATION_GAP`,
+    // pinned by `leading_duration_over_a_capped_window_refuses`). Asserting the
+    // driver here rather than `Refused` records which of the two refusal paths a
+    // free clause takes; conflating them is what sent an earlier round of this
+    // work to the wrong seam entirely.
+    assert!(
+        matches!(
+            lowering_with_stated_duration(
+                Cast,
+                true,
+                "a spell of that type from among the exiled cards without paying its mana cost"
+            ),
+            FromAmongBatchLowering::Driver(CastFromZoneDriver::ResolutionWindow { bounds })
+                if bounds.max_casts == Some(1)
+        ),
+        "a FREE cap of one must keep the resolution window and be refused at the \
+         duration seam — it must never reach the paid single-use promotion, which \
+         cannot express 'without paying its mana cost'"
+    );
+
+    // A cap of TWO has no single-use form either — `single_use` is a
+    // budget of one. March of Reckless Joy and Ashiok keep refusing until the
+    // bool becomes a count.
+    assert_eq!(
+        lowering_with_stated_duration(Cast, false, "up to two spells from among those cards"),
+        FromAmongBatchLowering::Refused,
+        "a cap of two cannot be carried by a single-use grant"
+    );
+
+    // Reach guard: an UNBOUNDED paid clause with the same stated duration still
+    // takes the ordinary lingering driver, so the promotion above is a genuine
+    // cap decision and not "any paid duration-bearing clause now promotes".
+    assert_eq!(
+        lowering_with_stated_duration(Cast, false, "spells from among those cards"),
+        FromAmongBatchLowering::Driver(LingeringPermission),
+        "reach guard: an unbounded paid batch keeps the per-object lingering grant"
+    );
 }
 
 /// CR 608.2g: the self-library one-card driver is selected ONLY for an exact
@@ -50077,19 +50523,19 @@ fn unrelated_remains_exiled_text_cannot_extend_permission_duration() {
 }
 
 /// Discriminating: the "for as long as it remains exiled, and mana of any
-/// type..." form (Blightwing Bandit class) must keep dispatching to
-/// `try_parse_exile_play_grant_with_any_mana` (duration `Permanent`), NOT be
-/// captured by the extended `try_parse_play_the_exiled_card_grant`. The
-/// extended combinator's `tag("the exiled ")` referent never matches the
-/// "that card"/"it" anaphor here, so no shadowing occurs.
+/// type..." form (Blightwing Bandit class) keeps its `Permanent` grant — NOT
+/// captured by the extended `try_parse_play_the_exiled_card_grant`, whose
+/// `tag("the exiled ")` referent never matches the "that card"/"it" anaphor —
+/// and the conjunct, cut off by the clause splitter, rides it.
 #[test]
 fn for_as_long_as_remains_exiled_any_mana_not_shadowed() {
-    let e = parse_effect(
+    let def = parse_effect_chain(
         "you may cast that card for as long as it remains exiled, \
              and mana of any type can be spent to cast that spell",
+        AbilityKind::Spell,
     );
-    let Effect::GrantCastingPermission { permission, .. } = e else {
-        panic!("expected GrantCastingPermission, got {e:?}");
+    let Effect::GrantCastingPermission { permission, .. } = &*def.effect else {
+        panic!("expected GrantCastingPermission, got {:?}", def.effect);
     };
     let CastingPermission::PlayFromExile {
         duration,
@@ -50099,9 +50545,9 @@ fn for_as_long_as_remains_exiled_any_mana_not_shadowed() {
     else {
         panic!("expected PlayFromExile permission");
     };
-    assert_ne!(duration, Duration::UntilEndOfTurn);
+    assert_ne!(*duration, Duration::UntilEndOfTurn);
     assert_eq!(
-        mana_spend_permission,
+        *mana_spend_permission,
         Some(ManaSpendPermission::AnyTypeOrColor)
     );
 }
@@ -50117,15 +50563,16 @@ fn for_as_long_as_remains_exiled_any_mana_not_shadowed() {
 /// correctly.
 #[test]
 fn duration_scoped_cast_from_tracked_exile_grant_with_any_color_conjunct() {
-    let e = parse_effect(
+    let def = parse_effect_chain(
         "Until end of turn, you may cast spells from among those exiled cards, \
              and you may spend mana as though it were mana of any color to cast those spells.",
+        AbilityKind::Spell,
     );
     let Effect::GrantCastingPermission {
         permission, target, ..
-    } = e
+    } = &*def.effect
     else {
-        panic!("expected GrantCastingPermission, got {e:?}");
+        panic!("expected GrantCastingPermission, got {:?}", def.effect);
     };
     let CastingPermission::PlayFromExile {
         duration,
@@ -50135,17 +50582,16 @@ fn duration_scoped_cast_from_tracked_exile_grant_with_any_color_conjunct() {
     else {
         panic!("expected PlayFromExile permission");
     };
-    assert_eq!(duration, Duration::UntilEndOfTurn);
+    assert_eq!(*duration, Duration::UntilEndOfTurn);
+    // CR 609.4b + CR 106.1a: "any color" is `AnyColor`.
+    assert_eq!(*mana_spend_permission, Some(ManaSpendPermission::AnyColor));
     assert_eq!(
-        mana_spend_permission,
-        Some(ManaSpendPermission::AnyTypeOrColor)
-    );
-    assert_eq!(
-        target,
+        *target,
         TargetFilter::TrackedSet {
             id: TrackedSetId(0)
         }
     );
+    assert!(def.sub_ability.is_none(), "the conjunct emits no sibling");
 }
 
 /// CR 400.7i: The "from among the exiled cards" determiner variant must
@@ -53365,6 +53811,7 @@ fn alt_cost_rider_folds_onto_prior_cast_from_zone() {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "expected all-player ExileTop to use player_scope + Controller, got {:?}",
@@ -65757,6 +66204,275 @@ fn a_cast_this_way_gate_defers_a_consequence_but_never_a_casting_property() {
     );
 }
 
+/// Issue #6856 contract pin: "Draw cards equal to the number of cards in
+/// target opponent's hand" (Recurring Insight) lowers to a controller-drawn
+/// `Draw` whose count reads the ability's player target
+/// (`TargetZoneCardCount { Hand, TargetOpponent, Explicit }`). The opponent
+/// slot itself is surfaced at runtime by `quantity_ref_target_slot_spec`
+/// (ability_utils) — this test pins the shape that contract relies on.
+#[test]
+fn recurring_insight_draw_count_reads_target_opponents_hand() {
+    let def = parse_effect_chain(
+        "Draw cards equal to the number of cards in target opponent's hand.",
+        AbilityKind::Spell,
+    );
+    let Effect::Draw { count, target } = &*def.effect else {
+        panic!("expected a Draw head, got {:?}", def.effect);
+    };
+    assert_eq!(*target, TargetFilter::Controller, "the caster draws");
+    assert!(
+        matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::TargetZoneCardCount {
+                    zone: ZoneRef::Hand,
+                    scope: ControllerRef::TargetOpponent,
+                    binding: CountBinding::Explicit,
+                },
+            }
+        ),
+        "the count reads the announced opponent's hand, got {count:?}",
+    );
+    assert!(def.sub_ability.is_none(), "single-link clause");
+}
+
+/// Issue #6856 (Tibalt, the Fiend-Blooded [-4]): "deals damage equal to the
+/// number of cards in target player's hand to that player" declares its
+/// recipient — the dead `TriggeringPlayer` anaphor rebinds to `Player` so
+/// announcement prompts and the amount reads the same choice. Instance
+/// sharing: the recipient inherits the count's instance, so the count flips
+/// `Explicit→Anaphoric` (one announcement, no second slot).
+#[test]
+fn tibalt_fiend_blooded_minus_four_targets_announced_player() {
+    let def = parse_effect_chain(
+        "Tibalt deals damage equal to the number of cards in target player's hand to that player.",
+        AbilityKind::Spell,
+    );
+    let Effect::DealDamage { amount, target, .. } = &*def.effect else {
+        panic!("expected a DealDamage head, got {:?}", def.effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::Player,
+        "the announced player is dealt the damage"
+    );
+    assert!(
+        matches!(
+            amount,
+            QuantityExpr::Ref {
+                qty: QuantityRef::TargetZoneCardCount {
+                    zone: ZoneRef::Hand,
+                    scope: ControllerRef::TargetPlayer,
+                    binding: CountBinding::Anaphoric,
+                },
+            }
+        ),
+        "the amount reads the announced player's hand, got {amount:?}",
+    );
+}
+
+/// MED1 (issue #9280 review): "Separate Instances deals damage equal to the
+/// number of cards in target opponent's hand to target player" declares TWO
+/// CR 601.2c instances — an `Explicit` count plus a `Player` recipient.
+/// Synthetic sentence (zero printed cards pair a separate recipient with a
+/// separate count source); pins the shape the two-slot cast test relies on.
+#[test]
+fn separate_damage_instances_parse_to_explicit_count_and_player_recipient() {
+    let def = parse_effect_chain(
+        "Separate Instances deals damage equal to the number of cards in target opponent's hand to target player.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        !matches!(*def.effect, Effect::Unimplemented { .. }),
+        "the MED1 sentence must lower, got {:?}",
+        def.effect
+    );
+    let Effect::DealDamage { amount, target, .. } = &*def.effect else {
+        panic!("expected a DealDamage head, got {:?}", def.effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::Player,
+        "the recipient is a declared player choice"
+    );
+    assert!(
+        matches!(
+            amount,
+            QuantityExpr::Ref {
+                qty: QuantityRef::TargetZoneCardCount {
+                    zone: ZoneRef::Hand,
+                    scope: ControllerRef::TargetOpponent,
+                    binding: CountBinding::Explicit,
+                },
+            }
+        ),
+        "the amount is an Explicit count, got {amount:?}",
+    );
+}
+
+/// MED2 (issue #9280 review): the scope-rewrite walkers rebind only
+/// anaphoric counts. An explicit "target player's/opponent's …" count
+/// declares its own CR 601.2c instance and must survive every walker for
+/// the slot machinery. Each walker gets an explicit-survives pin plus an
+/// anaphoric-rewrites pin; the walker under test is invoked directly so
+/// the pins cover the guard, not trigger-gate routing.
+#[test]
+fn rewrite_player_scope_refs_keeps_explicit_count() {
+    let mut def = parse_effect_chain(
+        "Draw cards equal to the number of cards in target opponent's hand.",
+        AbilityKind::Spell,
+    );
+    rewrite_player_scope_refs(&mut def);
+    let Effect::Draw { count, .. } = &*def.effect else {
+        panic!("expected a Draw head, got {:?}", def.effect);
+    };
+    assert!(
+        matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::TargetZoneCardCount {
+                    binding: CountBinding::Explicit,
+                    ..
+                },
+            }
+        ),
+        "explicit count must survive rewrite_player_scope_refs, got {count:?}",
+    );
+}
+
+#[test]
+fn rewrite_player_scope_refs_rebinds_anaphoric_count() {
+    let mut def = parse_effect_chain(
+        "Target player mills half their library, rounded down.",
+        AbilityKind::Spell,
+    );
+    rewrite_player_scope_refs(&mut def);
+    let Effect::Mill { count, .. } = &*def.effect else {
+        panic!("expected a Mill head, got {:?}", def.effect);
+    };
+    assert!(
+        matches!(
+            count,
+            QuantityExpr::DivideRounded { inner, .. }
+                if matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneCardCount {
+                            scope: crate::types::ability::CountScope::ScopedPlayer,
+                            ..
+                        },
+                    }
+                )
+        ),
+        "anaphoric count must rebind to ScopedPlayer, got {count:?}",
+    );
+}
+
+#[test]
+fn rewrite_player_quantity_refs_keeps_explicit_count() {
+    let mut def = parse_effect_chain(
+        "Draw cards equal to the number of cards in target opponent's hand.",
+        AbilityKind::Spell,
+    );
+    rewrite_player_quantity_refs_to_source_chosen(&mut def);
+    let Effect::Draw { count, .. } = &*def.effect else {
+        panic!("expected a Draw head, got {:?}", def.effect);
+    };
+    assert!(
+        matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::TargetZoneCardCount {
+                    binding: CountBinding::Explicit,
+                    ..
+                },
+            }
+        ),
+        "explicit count must survive rewrite_player_quantity_refs_to_source_chosen, got {count:?}",
+    );
+}
+
+#[test]
+fn rewrite_player_quantity_refs_rebinds_anaphoric_count() {
+    let mut def = parse_effect_chain(
+        "Target player mills half their library, rounded down.",
+        AbilityKind::Spell,
+    );
+    rewrite_player_quantity_refs_to_source_chosen(&mut def);
+    let Effect::Mill { count, .. } = &*def.effect else {
+        panic!("expected a Mill head, got {:?}", def.effect);
+    };
+    assert!(
+        matches!(
+            count,
+            QuantityExpr::DivideRounded { inner, .. }
+                if matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneCardCount {
+                            scope:
+                                crate::types::ability::CountScope::SourceChosenPlayer,
+                            ..
+                        },
+                    }
+                )
+        ),
+        "anaphoric count must rebind to SourceChosenPlayer, got {count:?}",
+    );
+}
+
+#[test]
+fn rewrite_event_player_quantity_refs_keeps_explicit_count() {
+    let mut def = parse_effect_chain(
+        "Draw cards equal to the number of cards in target opponent's hand.",
+        AbilityKind::Spell,
+    );
+    rewrite_event_player_quantity_refs_to_scoped(&mut def);
+    let Effect::Draw { count, .. } = &*def.effect else {
+        panic!("expected a Draw head, got {:?}", def.effect);
+    };
+    assert!(
+        matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::TargetZoneCardCount {
+                    binding: CountBinding::Explicit,
+                    ..
+                },
+            }
+        ),
+        "explicit count must survive rewrite_event_player_quantity_refs_to_scoped, got {count:?}",
+    );
+}
+
+#[test]
+fn rewrite_event_player_quantity_refs_rebinds_anaphoric_count() {
+    let mut def = parse_effect_chain(
+        "Target player mills half their library, rounded down.",
+        AbilityKind::Spell,
+    );
+    rewrite_event_player_quantity_refs_to_scoped(&mut def);
+    let Effect::Mill { count, .. } = &*def.effect else {
+        panic!("expected a Mill head, got {:?}", def.effect);
+    };
+    assert!(
+        matches!(
+            count,
+            QuantityExpr::DivideRounded { inner, .. }
+                if matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneCardCount {
+                            scope: crate::types::ability::CountScope::ScopedPlayer,
+                            ..
+                        },
+                    }
+                )
+        ),
+        "anaphoric count must rebind to ScopedPlayer, got {count:?}",
+    );
+}
+
 /// P-shared-count probe (Dismantle, plan §3.5 / §5.2.2) — MEASURED, not
 /// reasoned.
 ///
@@ -71996,4 +72712,1373 @@ fn frost_breath_plural_anaphor_keeps_parent_target() {
         "CR 608.2c: one declared instance is not two, so the grant keeps its \
          parent's declared targets"
     );
+}
+
+/// CR 609.4b: the any-color / any-type mana rider that follows a cast grant is
+/// a payment concession on THAT grant, not an effect: it folds onto the grant's
+/// `mana_spend_permission` and leaves no `GenericEffect` sibling behind. Both
+/// grant shapes and both rider spellings — the ", and you may spend mana as
+/// though …" conjunct (Siphon Insight, `CastFromZone`) and the separate
+/// "If you cast a spell this way, mana of any type can be spent …" sentence
+/// (Bloodsoaked Insight, `GrantCastingPermission { PlayFromExile }`).
+#[test]
+fn mana_spend_rider_folds_onto_the_preceding_cast_grant() {
+    let siphon = parse_effect_chain(
+        "Look at the top two cards of target opponent's library. Exile one of them face down \
+         and put the other on the bottom of that library. You may play the exiled card for as \
+         long as it remains exiled, and you may spend mana as though it were mana of any color \
+         to cast that spell.",
+        AbilityKind::Spell,
+    );
+    let effects = collect_chain_effects(&siphon);
+    let stamped: Vec<Option<ManaSpendPermission>> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::CastFromZone {
+                mana_spend_permission,
+                ..
+            } => Some(*mana_spend_permission),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        stamped,
+        vec![Some(ManaSpendPermission::AnyColor)],
+        "\"any color\" rides the play grant as AnyColor; chain: {effects:?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::GenericEffect { .. })),
+        "the rider emits no sibling static: {effects:?}"
+    );
+
+    let bloodsoaked = parse_effect_chain(
+        "Target opponent exiles the top three cards of their library. Until the end of your \
+         next turn, you may play those cards. If you cast a spell this way, mana of any type \
+         can be spent to cast it.",
+        AbilityKind::Spell,
+    );
+    let effects = collect_chain_effects(&bloodsoaked);
+    let stamped: Vec<Option<ManaSpendPermission>> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::GrantCastingPermission {
+                permission:
+                    CastingPermission::PlayFromExile {
+                        mana_spend_permission,
+                        ..
+                    },
+                ..
+            } => Some(*mana_spend_permission),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        stamped,
+        vec![Some(ManaSpendPermission::AnyTypeOrColor)],
+        "\"any type\" rides the play grant as AnyTypeOrColor; chain: {effects:?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::GenericEffect { .. })),
+        "the rider emits no sibling static: {effects:?}"
+    );
+}
+
+/// CR 607.2a + CR 608.2g: "you may cast an instant or sorcery card exiled
+/// with ~" (Summon: Esper Valigarmanda) casts one card of the source's linked
+/// exile as the ability resolves. The type-list reader would drop the link,
+/// so the head stays an honest gap and the rider after it is the standalone
+/// concession gap — never a permission over every exiled card of the types.
+/// The single-type form keeps its link (Raphael, Most Attitude).
+#[test]
+fn cast_a_type_list_card_exiled_with_self_is_a_gap() {
+    let chain = parse_effect_chain(
+        "You may cast an instant or sorcery card exiled with ~, and mana of any type can be \
+         spent to cast that spell.",
+        AbilityKind::Spell,
+    );
+    let effects = collect_chain_effects(&chain);
+    assert!(
+        matches!(
+            effects.first(),
+            Some(Effect::Unimplemented { name, .. }) if name == LINKED_EXILE_RESOLUTION_CAST_GAP
+        ),
+        "{effects:?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::CastFromZone { .. })),
+        "no cast grant: {effects:?}"
+    );
+
+    let raphael = parse_effect_chain(
+        "Until end of turn, you may play a card exiled with ~.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &*raphael.effect,
+            Effect::CastFromZone {
+                target: TargetFilter::And { filters },
+                ..
+            } if filters.contains(&TargetFilter::ExiledBySource)
+        ),
+        "{:?}",
+        raphael.effect
+    );
+}
+
+/// CR 400.3 + CR 115.1: in a triggered ability, "cast target … card from that
+/// player's graveyard" (Wrexial, the Risen Deep) chooses its card in the
+/// graveyard of the player the trigger's event names, so the cast target
+/// carries `Owned { TriggeringPlayer }`. A spell's untargeted "cast … spell
+/// from that player's graveyard" (Sorcerous Squall, where "that player" is the
+/// spell's target opponent) is not bound this way, nor is the targeted
+/// sentence outside a trigger, nor a "from a graveyard" origin whose clause
+/// mentions that player's graveyard only later.
+#[test]
+fn cast_target_card_from_that_players_graveyard_binds_its_owner() {
+    fn cast_target(parsed: &crate::parser::oracle::ParsedAbilities) -> TypedFilter {
+        let mut found = None;
+        let defs = parsed
+            .triggers
+            .iter()
+            .filter_map(|trigger| trigger.execute.as_deref())
+            .chain(parsed.abilities.iter());
+        for def in defs {
+            for effect in collect_chain_effects(def) {
+                if let Effect::CastFromZone {
+                    target: TargetFilter::Typed(typed),
+                    ..
+                } = effect
+                {
+                    found = Some(typed.clone());
+                }
+            }
+        }
+        found.expect("a typed CastFromZone")
+    }
+    let owned_by_triggering_player = FilterProp::Owned {
+        controller: ControllerRef::TriggeringPlayer,
+    };
+    let wrexial = cast_target(&parse_oracle_text(
+        "Islandwalk, swampwalk (This creature can't be blocked as long as defending player \
+         controls an Island or a Swamp.)\nWhenever Wrexial deals combat damage to a player, you \
+         may cast target instant or sorcery card from that player's graveyard without paying \
+         its mana cost. If that spell would be put into a graveyard, exile it instead.",
+        "Wrexial, the Risen Deep",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &[],
+    ));
+    assert!(
+        wrexial.properties.contains(&owned_by_triggering_player),
+        "{wrexial:?}"
+    );
+    // The owner is read off the origin phrase itself: a triggered "from a
+    // graveyard" stays unbound even when a later part of the same clause
+    // mentions that player's graveyard; the same clause with "from that
+    // player's graveyard" as its origin is bound.
+    let triggered_cast_target = |origin: &str| {
+        cast_target(&parse_oracle_text(
+            &format!(
+                "Whenever this creature deals combat damage to a player, you may cast target \
+                 instant card from {origin} with mana value less than or equal to the number \
+                 of cards in that player's graveyard without paying its mana cost."
+            ),
+            "Probe",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        ))
+    };
+    let any_graveyard = triggered_cast_target("a graveyard");
+    assert!(
+        any_graveyard.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }) && !any_graveyard
+            .properties
+            .contains(&owned_by_triggering_player),
+        "{any_graveyard:?}"
+    );
+    let that_players_graveyard = triggered_cast_target("that player's graveyard");
+    assert!(
+        that_players_graveyard
+            .properties
+            .contains(&owned_by_triggering_player),
+        "{that_players_graveyard:?}"
+    );
+    let squall = cast_target(&parse_oracle_text(
+        "Delve (Each card you exile from your graveyard while casting this spell pays for \
+         {1}.)\nTarget opponent mills nine cards, then you may cast an instant or sorcery \
+         spell from that player's graveyard without paying its mana cost. If that spell would \
+         be put into a graveyard, exile it instead.",
+        "Sorcerous Squall",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    ));
+    assert!(
+        !squall.properties.contains(&owned_by_triggering_player),
+        "{squall:?}"
+    );
+    let outside_a_trigger = parse_effect_chain(
+        "You may cast target instant or sorcery card from that player's graveyard without \
+         paying its mana cost.",
+        AbilityKind::Spell,
+    );
+    let Effect::CastFromZone {
+        target: TargetFilter::Typed(typed),
+        ..
+    } = &*outside_a_trigger.effect
+    else {
+        panic!(
+            "expected a typed CastFromZone: {:?}",
+            outside_a_trigger.effect
+        );
+    };
+    assert!(
+        !typed.properties.contains(&owned_by_triggering_player),
+        "{typed:?}"
+    );
+}
+
+/// CR 609.4b: the rider as a ", and …" conjunct of the grant's own sentence is
+/// cut off the grant by the clause splitter and folds onto it — whatever reads
+/// the grant, and also behind a leading duration or condition, whose comma
+/// latch used to glue the conjunct into the body (#9213). Nothing is left over:
+/// no gap, no sibling static, and no rider text inside a duration condition.
+#[test]
+fn mana_spend_rider_conjunct_folds_onto_the_grant_of_its_sentence() {
+    for (text, expected) in [
+        // Leading duration; no grant grammar claimed the whole sentence.
+        (
+            "Until end of turn, you may cast spells from among those cards, and mana of any \
+             type can be spent to cast those spells.",
+            ManaSpendPermission::AnyTypeOrColor,
+        ),
+        // Leading duration, the "you may spend … any color" spelling.
+        (
+            "Until end of turn, you may cast spells from among cards exiled with this Saga, \
+             and you may spend mana as though it were mana of any color to cast those spells.",
+            ManaSpendPermission::AnyColor,
+        ),
+        // Trailing "for as long as": its condition used to read the conjunct.
+        (
+            "You may play those cards for as long as they remain exiled, and mana of any type \
+             can be spent to cast them.",
+            ManaSpendPermission::AnyTypeOrColor,
+        ),
+        // Leading condition.
+        (
+            "If an instant or sorcery card is exiled this way, you may cast it for as long as \
+             you control this creature, and mana of any type can be spent to cast that spell.",
+            ManaSpendPermission::AnyTypeOrColor,
+        ),
+        // A grant whose grammar never read past its head.
+        (
+            "You may cast it this turn, and mana of any type can be spent to cast that spell.",
+            ManaSpendPermission::AnyTypeOrColor,
+        ),
+    ] {
+        let chain = parse_effect_chain(text, AbilityKind::Spell);
+        let effects = collect_chain_effects(&chain);
+        let stamped: Vec<Option<ManaSpendPermission>> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::CastFromZone {
+                    mana_spend_permission,
+                    ..
+                }
+                | Effect::GrantCastingPermission {
+                    permission:
+                        CastingPermission::PlayFromExile {
+                            mana_spend_permission,
+                            ..
+                        },
+                    ..
+                } => Some(*mana_spend_permission),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stamped, vec![Some(expected)], "{text:?} -> {effects:?}");
+        assert!(
+            !effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Unimplemented { .. } | Effect::GenericEffect { .. }
+            )),
+            "nothing left over: {text:?} -> {effects:?}"
+        );
+        let debug = format!("{chain:?}");
+        assert!(
+            !debug.contains("can be spent") && !debug.contains("as though"),
+            "no rider text survives anywhere in the chain: {debug}"
+        );
+    }
+}
+
+/// CR 609.4b: a mana-spend concession with no cast grant to fold onto is an
+/// honest gap, never a `SpendManaAsAnyColor` static — an effect-granted one has
+/// no payment-time carrier, and none could carry a scope or a one-use limit
+/// such as North Star's "For one spell this turn, … to pay that spell's mana
+/// cost". After a grant, the same wording still folds onto it
+/// (`mana_spend_rider_folds_onto_the_preceding_cast_grant`).
+#[test]
+fn standalone_mana_spend_concession_is_a_gap() {
+    for text in [
+        "Until end of turn, you may spend mana as though it were mana of any type.",
+        "Until end of turn, you may spend mana as though it were mana of any color.",
+        "For one spell this turn, you may spend mana as though it were mana of any type to pay \
+         that spell's mana cost.",
+        "You may spend mana as though it were mana of any color to cast Case spells.",
+        "You may spend mana as though it were mana of any color the next time you cast that \
+         card.",
+    ] {
+        let chain = parse_effect_chain(text, AbilityKind::Spell);
+        let effects = collect_chain_effects(&chain);
+        assert!(
+            !effects.iter().any(|effect| matches!(
+                effect,
+                Effect::GenericEffect { static_abilities, .. }
+                    if static_abilities.iter().any(|s| matches!(
+                        s.mode,
+                        StaticMode::SpendManaAsAnyColor { .. }
+                    ))
+            )),
+            "no concession static: {text:?}"
+        );
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Unimplemented { name, .. } if name == STANDALONE_MANA_SPEND_CONCESSION_GAP
+            )),
+            "honest gap: {text:?} -> {effects:?}"
+        );
+    }
+}
+
+/// CR 609.4b: the rider modifies the grant it FOLLOWS. Without a cast grant
+/// directly before it nothing is folded and the clause is the standalone
+/// concession gap. A concession narrower than "mana" after a grant ("colorless
+/// mana as though …", Abstruse Appropriation; "mana from snow sources as though
+/// …", Draugr Necromancer's wording) is an honest gap: the grant lowers, the
+/// rider is `Unimplemented`, and the grant is never widened to every mana.
+#[test]
+fn mana_spend_rider_folds_nothing_without_a_matching_grant() {
+    let without_grant = parse_effect_chain(
+        "Draw a card. You may spend mana as though it were mana of any color to cast that \
+         spell.",
+        AbilityKind::Spell,
+    );
+    let effects = collect_chain_effects(&without_grant);
+    // No grant to fold onto, and "to cast that spell" is a scope the unfiltered
+    // standalone static cannot carry: an honest gap, never a board-wide static.
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Unimplemented { name, .. } if name == STANDALONE_MANA_SPEND_CONCESSION_GAP
+        )),
+        "no grant to fold onto: the scoped rider is a gap: {effects:?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::GenericEffect { .. })),
+        "no board-wide static: {effects:?}"
+    );
+
+    for narrower in [
+        "Exile target nonland permanent. You may cast that card for as long as it remains \
+         exiled, and you may spend colorless mana as though it were mana of any color to cast \
+         that spell.",
+        "You may cast spells from among cards in exile your opponents own with ice counters on \
+         them, and you may spend mana from snow sources as though it were mana of any color to \
+         cast those spells.",
+    ] {
+        let chain = parse_effect_chain(narrower, AbilityKind::Spell);
+        let effects = collect_chain_effects(&chain);
+        let widened = effects.iter().any(|effect| match effect {
+            Effect::CastFromZone {
+                mana_spend_permission,
+                ..
+            } => mana_spend_permission.is_some(),
+            Effect::GrantCastingPermission {
+                permission:
+                    CastingPermission::PlayFromExile {
+                        mana_spend_permission,
+                        ..
+                    },
+                ..
+            } => mana_spend_permission.is_some(),
+            _ => false,
+        });
+        assert!(
+            !widened,
+            "a concession narrower than \"mana\" must not widen the grant: {effects:?}"
+        );
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                Effect::CastFromZone {
+                    mana_spend_permission: None,
+                    ..
+                } | Effect::GrantCastingPermission {
+                    permission: CastingPermission::PlayFromExile {
+                        mana_spend_permission: None,
+                        ..
+                    },
+                    ..
+                }
+            )),
+            "the grant the rider follows still lowers, without a concession: {effects:?}"
+        );
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Unimplemented { name, .. }
+                    if name == UNREPRESENTABLE_MANA_SPEND_CONCESSION_GAP
+            )),
+            "the single-kind rider after a grant is an honest gap, not a static: {effects:?}"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::GenericEffect { .. })),
+            "no bare board-wide static survives: {effects:?}"
+        );
+    }
+}
+
+/// CR 609.4b: a single-kind concession with NO cast grant before it
+/// ("spend colorless mana …", "mana from snow sources …", False Dawn's "white
+/// mana", Quicksilver Elemental's "blue mana") is the same honest gap as after a
+/// grant — never the board-wide `SpendManaAsAnyColor` that relaxes every mana.
+/// The plain "spend mana …" sentence on the same route is the standalone gap
+/// instead (the other half of the classification).
+#[test]
+fn standalone_single_kind_mana_concession_is_a_gap_not_a_widened_static() {
+    for (text, single_kind) in [
+        (
+            "Draw a card. You may spend colorless mana as though it were mana of any color to \
+             cast that spell.",
+            true,
+        ),
+        (
+            "Draw a card. You may spend mana from snow sources as though it were mana of any \
+             type to cast those spells.",
+            true,
+        ),
+        (
+            "Until end of turn, you may spend white mana as though it were mana of any color.",
+            true,
+        ),
+        (
+            "You may spend blue mana as though it were mana of any color to pay the activation \
+             costs of this creature's abilities.",
+            true,
+        ),
+        (
+            "Draw a card. You may spend mana as though it were mana of any color to cast that \
+             spell.",
+            false,
+        ),
+    ] {
+        let chain = parse_effect_chain(text, AbilityKind::Spell);
+        let effects = collect_chain_effects(&chain);
+        let widened = effects.iter().any(|effect| {
+            matches!(
+                effect,
+                Effect::GenericEffect { static_abilities, .. }
+                    if static_abilities.iter().any(|s| matches!(
+                        s.mode,
+                        StaticMode::SpendManaAsAnyColor { .. }
+                    ))
+            )
+        });
+        let gap = effects.iter().find_map(|effect| match effect {
+            Effect::Unimplemented { name, .. } => Some(name.as_str()),
+            _ => None,
+        });
+        let expected_gap = if single_kind {
+            UNREPRESENTABLE_MANA_SPEND_CONCESSION_GAP
+        } else {
+            STANDALONE_MANA_SPEND_CONCESSION_GAP
+        };
+        assert_eq!(
+            (widened, gap),
+            (false, Some(expected_gap)),
+            "{text:?}: (board-wide static, gap); chain: {effects:?}"
+        );
+    }
+}
+
+/// CR 609.4b: admission and stamp share ONE traversal
+/// (`awaiting_mana_spend_grant_depth`). With an eligible grant both at the top
+/// and in `sub_ability`, the rider goes to the deeper one — the grant it
+/// follows in text order — and the outer grant stays untouched.
+#[test]
+fn mana_spend_rider_admission_and_stamp_pick_the_same_grant() {
+    let siphon = parse_effect_chain(
+        "Look at the top two cards of target opponent's library. Exile one of them face down \
+         and put the other on the bottom of that library. You may play the exiled card for as \
+         long as it remains exiled.",
+        AbilityKind::Spell,
+    );
+    let grant = collect_chain_effects(&siphon)
+        .into_iter()
+        .find(|effect| effect_awaits_mana_spend_permission(effect))
+        .cloned()
+        .expect("the play grant lowers without a concession");
+    let mut outer = AbilityDefinition::new(AbilityKind::Spell, grant.clone());
+    outer.sub_ability = Some(Box::new(AbilityDefinition::new(AbilityKind::Spell, grant)));
+    assert_eq!(
+        awaiting_mana_spend_grant_depth(&outer.effect, outer.sub_ability.as_deref()),
+        Some(1),
+        "the deeper grant is the one the rider follows"
+    );
+
+    let mut defs = vec![outer];
+    assert!(attach_mana_spend_permission_to_prior_cast_grant(
+        &mut defs,
+        ManaSpendPermission::AnyColor
+    ));
+    let outer = &defs[0];
+    let inner = outer.sub_ability.as_deref().expect("sub_ability kept");
+    assert!(
+        effect_awaits_mana_spend_permission(&outer.effect),
+        "the outer grant is not the one admitted, so it stays unstamped: {outer:?}"
+    );
+    assert!(
+        matches!(
+            &*inner.effect,
+            Effect::CastFromZone {
+                mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+                ..
+            } | Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+                    ..
+                },
+                ..
+            }
+        ),
+        "the admitted (deeper) grant carries the concession: {inner:?}"
+    );
+}
+
+/// CR 609.4b: the rider grammar — subject, concession, and cast object are
+/// independent axes. "color" → `AnyColor`, "type" → `AnyTypeOrColor`; the
+/// "If you cast a spell this way," gate is dropped (it restates the scope the
+/// fold already gives the concession); a single-kind subject is reported, not
+/// widened. A pin of the recognizer alone — the fold test above is the
+/// discriminator.
+#[test]
+fn mana_spend_rider_grammar() {
+    use ManaSpendRider::{Concession, SingleKind};
+    for (text, expected) in [
+        (
+            "you may spend mana as though it were mana of any color to cast that spell",
+            Some(Concession(ManaSpendPermission::AnyColor)),
+        ),
+        (
+            "spend mana as though it were mana of any type to cast those spells.",
+            Some(Concession(ManaSpendPermission::AnyTypeOrColor)),
+        ),
+        (
+            "Mana of any type can be spent to cast spells this way.",
+            Some(Concession(ManaSpendPermission::AnyTypeOrColor)),
+        ),
+        (
+            "Mana of any type can be spent to cast a spell this way",
+            Some(Concession(ManaSpendPermission::AnyTypeOrColor)),
+        ),
+        (
+            "If you cast a spell this way, mana of any type can be spent to cast it.",
+            Some(Concession(ManaSpendPermission::AnyTypeOrColor)),
+        ),
+        (
+            "Mana of any color can be spent to cast that spell",
+            Some(Concession(ManaSpendPermission::AnyColor)),
+        ),
+        // Narrower than "mana": reported as a single kind.
+        (
+            "you may spend colorless mana as though it were mana of any color to cast that spell",
+            Some(SingleKind),
+        ),
+        (
+            "you may spend mana from snow sources as though it were mana of any color to cast \
+             those spells",
+            Some(SingleKind),
+        ),
+        // Not a cast rider at all.
+        (
+            "you may spend mana as though it were mana of any color to activate those abilities",
+            None,
+        ),
+        (
+            "you may spend mana as though it were mana of any color to cast planeswalker spells",
+            None,
+        ),
+    ] {
+        assert_eq!(try_parse_mana_spend_rider(text), expected, "{text:?}");
+    }
+}
+
+/// CR 118.14 + CR 609.4b: the inline conjunct recognizers accept the printed
+/// objects — "… to cast it" after "for as long as it remains exiled" (Court of
+/// Locthwain, #8481; Blightwing Bandit; Cruelclaw's Heist) and ", and mana of
+/// any type can be spent to cast it" after "this turn" (Reno and Rude). Pre-fix
+/// each sentence fell through to the catch-all static and lost its grant.
+#[test]
+fn inline_any_mana_conjunct_accepts_it_and_the_comma() {
+    for (text, expected_duration) in [
+        (
+            "You may play that card for as long as it remains exiled, and mana of any type can \
+             be spent to cast it.",
+            Duration::Permanent,
+        ),
+        (
+            "You may play the exiled card this turn, and mana of any type can be spent to cast \
+             it.",
+            Duration::UntilEndOfTurn,
+        ),
+    ] {
+        let chain = parse_effect_chain(text, AbilityKind::Spell);
+        let Effect::GrantCastingPermission {
+            permission:
+                CastingPermission::PlayFromExile {
+                    duration,
+                    mana_spend_permission,
+                    ..
+                },
+            ..
+        } = &*chain.effect
+        else {
+            panic!(
+                "expected a PlayFromExile grant for {text:?}, got {:?}",
+                chain.effect
+            );
+        };
+        assert_eq!(*duration, expected_duration, "{text:?}");
+        assert_eq!(
+            *mana_spend_permission,
+            Some(ManaSpendPermission::AnyTypeOrColor),
+            "{text:?}"
+        );
+        assert!(
+            !collect_chain_effects(&chain)
+                .iter()
+                .any(|effect| matches!(effect, Effect::GenericEffect { .. })),
+            "no sibling static: {text:?}"
+        );
+    }
+}
+
+// =========================================================================
+// THE INTERPOSED DEFENDER-CLASS GRAMMAR, EFFECT SIDE (CR 702.3b +
+// CR 609.4 + CR 611.2c). The `ROW n` / `ARM n` banners below label
+// the sections of this group and share their numbering with the static-side
+// counterparts in `oracle_static/tests.rs`.
+//
+// Every arm attributes its production by OUTPUT SHAPE — a multi-element
+// `static_abilities` vec on ONE `GenericEffect` is
+// `build_defender_attack_continuous_compound`'s signature, which the sequence
+// splitter (a 1-element vec plus a `sub_ability`) cannot produce — rather than by
+// naming a function the fixture is assumed to reach.
+// =========================================================================
+
+/// The interposed player class Weathered Sentinels prints.
+const P3E_SEG: &str = "players who attacked you during their last turn";
+
+/// Walking Bulwark's VERBATIM printed text — the ONLY corpus card that reaches
+/// `build_defender_attack_continuous_compound` (its gate is a `','` split with
+/// `segments.len() >= 2` plus an all-consuming defender predicate, replicated over
+/// the complete 56-card defender-exception candidate set).
+const P3E_WALKING_BULWARK: &str = "Defender\n{2}: Until end of turn, target creature with defender gains haste, can attack as though it didn't have defender, and assigns combat damage equal to its toughness rather than its power. Activate only as a sorcery.";
+
+/// The first `GenericEffect`'s `static_abilities` vec — the compound's signature.
+fn p3e_generic_statics(text: &str) -> Vec<crate::types::ability::StaticDefinition> {
+    let parsed = parse_oracle_text(
+        text,
+        "Walking Bulwark",
+        &[],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Wall".to_string()],
+    );
+    parsed
+        .abilities
+        .iter()
+        .find_map(|ability| match ability.effect.as_ref() {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => Some(static_abilities.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn p3e_modes(defs: &[crate::types::ability::StaticDefinition]) -> Vec<StaticMode> {
+    defs.iter().map(|d| d.mode.clone()).collect()
+}
+
+fn p3e_anchored() -> StaticCondition {
+    StaticCondition::AnyPlayerAttackedYouLastTurn {
+        scope: crate::types::ability::AttackedYouScope::AttackedPlayer,
+    }
+}
+
+/// ROW 4, EFFECT ARM: where the permission's duration comes from.
+///
+/// CR 611.2a: the duration of the granted permission is the one the
+/// PERMISSION prints, and production (c) reads it off the RECOGNIZED
+/// defender-exception segment. Base instead asked `lower.contains("this turn")`
+/// over the whole clause, which cannot distinguish two different jobs the same
+/// two words do:
+///
+///  * `"can attack THIS TURN as though it didn't have defender"` — the adverbial
+///    IS the segment. The permission expires at end of turn.
+///  * `"target creature that was dealt damage THIS TURN can attack as though it
+///    didn't have defender"` — the adverbial qualifies the SUBJECT's damage
+///    history, selecting WHICH creature is targeted. It says nothing about when
+///    the permission ends, and reading it as a duration published a permission
+///    that silently expired at cleanup.
+///
+/// All 20 duration-form corpus lines live on THIS production (14 activated, 6
+/// triggered; ZERO printed statics), so the classifier's
+/// `all_consuming(tag("this turn"))` decision is corpus-visible here.
+///
+/// TWO-SIDED by construction — neither fixture alone buys the scoping:
+///  * the DURATION-FORM fixture reds if the derivation narrows to always-`None`;
+///  * the SUBJECT-CARRIED fixture reds if it widens back to the whole clause.
+///
+/// The reach-guard between them proves the production actually saw the line.
+///
+/// The subject-carried fixture is composed from two printed templates — Crushing
+/// Pain's `"target creature that was dealt damage this turn"` and the CR 702.3b
+/// tail — rather than lifted from one card: measured over the 56 corpus lines
+/// printing that tail, every one carrying `"this turn"` OUTSIDE the segment does
+/// so in an `"As long as ... this turn,"` prefix and parses to the printed-static
+/// production, never to (c).
+#[test]
+fn defender_exception_duration_comes_from_the_segment_not_the_subject() {
+    // (1) GENUINE PERMISSION DURATION: the adverbial IS the segment.
+    let parsed = parse_oracle_text(
+        "Target creature can attack this turn as though it didn't have defender.",
+        "Probe",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let Some(Effect::GenericEffect {
+        static_abilities,
+        duration,
+        ..
+    }) = parsed.abilities.first().map(|a| a.effect.as_ref())
+    else {
+        panic!("expected a GenericEffect, got {:?}", parsed.abilities);
+    };
+    assert_eq!(
+        duration,
+        &Some(Duration::UntilEndOfTurn),
+        "a DurationAdverbial segment is the one shape that sets the duration; \
+         narrowing the derivation to always-None reds here"
+    );
+    assert_eq!(static_abilities.len(), 1);
+    assert_eq!(static_abilities[0].mode, StaticMode::CanAttackWithDefender);
+    assert_eq!(
+        static_abilities[0].condition, None,
+        "a duration adverbial is NOT a player class and must carry no condition"
+    );
+
+    // (2) REACH-GUARD, same production: the INTERPOSED form IS accepted here, so
+    // the `condition: None` above is a measured routing decision rather than a
+    // production that never saw the line.
+    let reach = parse_oracle_text(
+        &format!("Target creature can attack {P3E_SEG} as though it didn't have defender."),
+        "Probe",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let Some(Effect::GenericEffect {
+        static_abilities, ..
+    }) = reach.abilities.first().map(|a| a.effect.as_ref())
+    else {
+        panic!(
+            "reach-guard: expected a GenericEffect, got {:?}",
+            reach.abilities
+        );
+    };
+    assert_eq!(static_abilities[0].condition, Some(p3e_anchored()));
+
+    // (3) UNRESTRICTED DAMAGE-HISTORY SUBJECT: `"this turn"` sits in the SUBJECT
+    // and the interposed segment is EMPTY, so the classifier answers
+    // `Unrestricted` and the permission carries NO duration. This is the fixture
+    // the whole-clause derivation got wrong; it reds if that derivation returns.
+    let subject_carried = parse_oracle_text(
+        "Target creature that was dealt damage this turn can attack as though it didn't have defender.",
+        "Probe",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let Some(Effect::GenericEffect {
+        static_abilities,
+        duration,
+        ..
+    }) = subject_carried.abilities.first().map(|a| a.effect.as_ref())
+    else {
+        panic!(
+            "subject-carried: expected a GenericEffect, got {:?}",
+            subject_carried.abilities
+        );
+    };
+    assert_eq!(
+        static_abilities[0].condition, None,
+        "the interposed segment is empty, so no player class is carried"
+    );
+    assert_eq!(
+        duration, &None,
+        "CR 611.2a: `this turn` qualifies the SUBJECT's damage history, not the \
+         permission — a whole-clause derivation reds here"
+    );
+
+    // (4) NO-ADVERBIAL CONTROL: nothing anywhere in the clause.
+    let no_adverbial = parse_oracle_text(
+        "Target creature can attack as though it didn't have defender.",
+        "Probe",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let Some(Effect::GenericEffect { duration, .. }) =
+        no_adverbial.abilities.first().map(|a| a.effect.as_ref())
+    else {
+        panic!(
+            "no-adverbial control: expected a GenericEffect, got {:?}",
+            no_adverbial.abilities
+        );
+    };
+    assert_eq!(
+        duration, &None,
+        "with no adverbial anywhere in the clause the production carries no duration"
+    );
+}
+
+/// ROW 7 ARM (iii): the class is supported on production
+/// (c), `try_parse_can_attack_with_defender` — a RESOLUTION-side continuous
+/// effect, authorized by CR 611.2c rather than CR 611.3a.
+///
+/// Attributed by OUTPUT SHAPE: an `Effect::GenericEffect` carrying an
+/// `AddStaticMode` modification, which ONLY production (c) produces, plus a direct
+/// unit assertion on the shared recognition predicate.
+#[test]
+fn interposed_class_is_supported_on_the_effect_production() {
+    let parse = |text: &str| {
+        let p = parse_oracle_text(text, "Probe", &[], &["Instant".to_string()], &[]);
+        match p.abilities.first().map(|a| a.effect.as_ref()) {
+            Some(Effect::GenericEffect {
+                static_abilities, ..
+            }) => static_abilities.clone(),
+            other => panic!("expected a GenericEffect, got {other:?}"),
+        }
+    };
+
+    let subject = parse(&format!(
+        "Target creature can attack {P3E_SEG} as though it didn't have defender."
+    ));
+    assert_eq!(subject.len(), 1);
+    assert_eq!(subject[0].mode, StaticMode::CanAttackWithDefender);
+    assert_eq!(subject[0].affected, Some(TargetFilter::ParentTarget));
+    assert_eq!(
+        subject[0].modifications,
+        vec![ContinuousModification::AddStaticMode {
+            mode: StaticMode::CanAttackWithDefender,
+        }],
+        "the AddStaticMode modification is production (c)'s signature"
+    );
+    assert_eq!(subject[0].condition, Some(p3e_anchored()));
+
+    // PAIRED POSITIVE CONTROL, SAME PRODUCTION, SAME FIXTURE: the PLAIN form keeps
+    // its unconditioned permission and the SAME `affected`.
+    let control = parse("Target creature can attack as though it didn't have defender.");
+    assert_eq!(control.len(), 1);
+    assert_eq!(control[0].mode, StaticMode::CanAttackWithDefender);
+    assert_eq!(control[0].affected, Some(TargetFilter::ParentTarget));
+    assert_eq!(control[0].condition, None);
+
+    // HOSTILE FIXTURE, SAME PRODUCTION: the shared classifier's inert terminal, so
+    // this arm's classifier call is measurably the SHARED one.
+    let hostile = parse(
+        "Target creature can attack players who wear a hat as though it didn't have defender.",
+    );
+    assert!(matches!(
+        hostile[0].condition,
+        Some(StaticCondition::Not { .. })
+    ));
+
+    // The shared recognition predicate itself (8a), reachable from this module.
+    assert!(super::subject::is_can_attack_despite_defender_predicate(
+        &format!("can attack {P3E_SEG} as though it didn't have defender.")
+    ));
+    assert!(super::subject::is_can_attack_despite_defender_predicate(
+        "can attack as though it didn't have defender."
+    ));
+}
+
+/// ROW 8, ARM 6: the CONTINUOUS COMPOUND
+/// (`build_defender_attack_continuous_compound`, CR 702.3b + CR 510.1c +
+/// CR 611.2c) carries the anchored condition.
+///
+/// A PAIR in ONE test on Walking Bulwark's VERBATIM printed line — the only corpus
+/// card that reaches this production.
+///
+/// THE CONTROL DOES TWO JOBS. Beyond proving the compound fires, its ARITY and
+/// ORDER are what discriminate the module's emptiness check: relax
+/// `all_consuming_defender_tail`'s `rest.is_empty()` to a prefix and production (c)
+/// claims the whole clause BEFORE the compound is reached, collapsing this
+/// three-element vec to ONE `CanAttackWithDefender` whose `description` is the
+/// whole predicate, with the `gains haste` and damage-assignment conjuncts LOST.
+/// Dropping the same policy at production (c)'s OWN call site
+/// (`split_defender_exception_predicate_all_consuming`) produces the identical
+/// collapse, so this test guards both.
+///
+/// Inside the compound's loop the alternative to the defender branch is
+/// `parse_continuous_modifications`, which for this exact grammar returns
+/// `[AddKeyword(Defender)]` — the INVERSE of the printed clause. Reverting the
+/// LOOP's `permission_condition()` attachment ALONE, with the gate's predicate
+/// widened, makes the SUBJECT's
+/// middle element `condition: null` — byte-identical to the CONTROL's, which is
+/// PRECISELY the #8785 defect shape on a sibling grammar. The two halves differ on
+/// exactly that one value.
+#[test]
+fn walking_bulwark_comma_compound_carries_the_anchored_condition() {
+    let expected_modes = vec![
+        StaticMode::Continuous,
+        StaticMode::CanAttackWithDefender,
+        StaticMode::Continuous,
+    ];
+
+    // CONTROL — the unmodified printed line. THREE elements IN ORDER.
+    let control = p3e_generic_statics(P3E_WALKING_BULWARK);
+    assert_eq!(
+        p3e_modes(&control),
+        expected_modes,
+        "control: the compound must fire and keep all three conjuncts IN ORDER; got {control:?}"
+    );
+    assert_eq!(
+        control[0].modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Haste
+        }]
+    );
+    assert_eq!(control[1].condition, None);
+    assert_eq!(
+        control[2].modifications,
+        vec![ContinuousModification::AssignDamageFromToughness]
+    );
+
+    // SUBJECT — the same line with the class interposed. SAME three elements in the
+    // SAME order; only the middle element's `condition` moves.
+    let subject = p3e_generic_statics(&P3E_WALKING_BULWARK.replace(
+        "can attack as though",
+        &format!("can attack {P3E_SEG} as though"),
+    ));
+    assert_eq!(
+        p3e_modes(&subject),
+        expected_modes,
+        "subject: the interposed line must keep all three conjuncts; got {subject:?}"
+    );
+    assert_eq!(
+        subject[1].condition,
+        Some(p3e_anchored()),
+        "an interposed line must NEVER yield an unconditioned \
+         CanAttackWithDefender — the interposed class is the permission's gate, \
+         so dropping it grants the permission unconditionally"
+    );
+    assert_eq!(subject[0].modifications, control[0].modifications);
+    assert_eq!(subject[2].modifications, control[2].modifications);
+    // and NO AddKeyword(Defender) anywhere in the vec — the base defect, measured
+    // before this change as ONE fused `Continuous{[AssignDamageFromToughness,
+    // AddKeyword(Defender)]}` with the `gains haste` conjunct LOST.
+    assert!(
+        !subject.iter().any(|d| d
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Defender
+            })),
+        "the INVERSE grant must not reappear; got {subject:?}"
+    );
+}
+
+/// ROW 8, ARM 12: THE SHARED ALL-CONSUMING POLICY AT THE PREDICATE'S CALL SITE —
+/// `is_can_attack_despite_defender_predicate`'s choice of
+/// `defender_exception_predicate_all_consuming` over the bare adapter.
+///
+/// THE FIXTURE IS SYNTHESIZED AND ITS CORPUS EXPOSURE IS MEASURED ZERO: the tail
+/// census over all 56 corpus defender-exception lines finds 44 tails of `"."`,
+/// three `". Activate only …"`, three `" as long as <cond>."` riders, two `"."`
+/// inside quoted granted text, one `" and it can't be blocked."`, one
+/// `", and assigns combat damage …"`, one `". Exile it at the beginning of the
+/// next end step."` and one `". (Equipment, … are modifications.)"` reminder —
+/// 44+3+3+2+1+1+1+1 = 56, and NONE is a trailing-text tail inside a comma
+/// compound. No printed card can buy this line, so a synthesized fixture is the
+/// only instrument.
+///
+/// Deleting `all_consuming_defender_tail(rest)?` from
+/// `defender_exception_predicate_all_consuming` flips the SUBJECT from ONE fused
+/// element to THREE, the middle an UNCONDITIONED `CanAttackWithDefender` on a
+/// segment carrying trailing text — where base and the candidate both refuse —
+/// while the CONTROL stays byte-identical.
+///
+/// It is a SEPARATE `#[test]` from arm 6 and from arm 13 because the three
+/// discriminate three DIFFERENT call sites of one policy: arm 6's control fails
+/// when production (c) stops applying it, THIS arm fails when
+/// `is_can_attack_despite_defender_predicate` stops applying it, and arm 13 fails
+/// when the compound's per-segment LOOP stops applying it. Merging any two leaves
+/// one call site with no test of its own.
+#[test]
+fn defender_segment_with_trailing_text_is_refused_by_the_shared_all_consuming_policy() {
+    // CONTROL — the reach-guard: the compound fires on the verbatim printed line.
+    // Without it the SUBJECT's assertion is a zero on an instrument that never ran.
+    let control = p3e_generic_statics(P3E_WALKING_BULWARK);
+    assert_eq!(
+        p3e_modes(&control),
+        vec![
+            StaticMode::Continuous,
+            StaticMode::CanAttackWithDefender,
+            StaticMode::Continuous,
+        ],
+        "control: the compound must fire; got {control:?}"
+    );
+
+    // SUBJECT — trailing text appended INSIDE the defender segment, after the tail.
+    // The gate stays SHUT and the compound declines, so the whole predicate falls to
+    // the generic continuous parser as ONE fused element.
+    let subject = p3e_generic_statics(
+        &P3E_WALKING_BULWARK.replace("didn't have defender,", "didn't have defender QUICKLY,"),
+    );
+    assert_eq!(
+        subject.len(),
+        1,
+        "the retained all-consuming policy must REFUSE a segment with trailing text; \
+         got {subject:?}"
+    );
+    assert_eq!(subject[0].mode, StaticMode::Continuous);
+    assert!(
+        !subject
+            .iter()
+            .any(|d| d.mode == StaticMode::CanAttackWithDefender),
+        "no CanAttackWithDefender may be pushed for a segment the policy refuses"
+    );
+
+    // The predicate itself, at the seam the mutation bites: the trailing-text form is
+    // REFUSED and the clean form is ACCEPTED, in one pair.
+    assert!(!super::subject::is_can_attack_despite_defender_predicate(
+        "can attack as though it didn't have defender quickly"
+    ));
+    assert!(super::subject::is_can_attack_despite_defender_predicate(
+        "can attack as though it didn't have defender"
+    ));
+}
+
+/// ROW 8, ARM 13: THE SHARED ALL-CONSUMING POLICY AT THE COMPOUND LOOP'S CALL
+/// SITE — the per-segment LOOP's choice of
+/// `defender_exception_predicate_all_consuming` over the bare adapter.
+///
+/// THE FIXTURE IS SYNTHESIZED AND ITS CORPUS EXPOSURE IS MEASURED ZERO (the same
+/// tail census arm 12 cites).
+///
+/// ARM 12 SPECIFICALLY DOES NOT CATCH THIS, and the reason is measured rather than
+/// argued: under this mutation arm 12's per-segment LOOP verdict does flip, but the
+/// GATE — which runs `is_can_attack_despite_defender_predicate`, untouched by a
+/// change to the loop — stays SHUT, so the loop is never
+/// entered. THIS fixture carries TWO defender segments, the first clean and the
+/// second with trailing text, so the gate OPENS on segment 2, the loop is ENTERED,
+/// a `CanAttackWithDefender` is PUSHED, and only then does the loop bail on the
+/// trailing-text segment — reach demonstrated in the UNMUTATED direction.
+///
+/// With the LOOP reverted to the bare PREFIX adapter the SUBJECT flips from ONE
+/// element to FOUR, the THIRD an UNCONDITIONED
+/// `CanAttackWithDefender{description: "can attack as though it didn't have defender quickly"}`
+/// — the #8785 defect shape on the continuous compound's own production — while the
+/// CONTROL stays byte-identical.
+#[test]
+fn two_defender_segments_in_one_compound_keep_the_all_consuming_policy_at_the_loop() {
+    // CONTROL — Walking Bulwark's verbatim printed line, the reach-guard.
+    let control = p3e_generic_statics(P3E_WALKING_BULWARK);
+    assert_eq!(
+        p3e_modes(&control),
+        vec![
+            StaticMode::Continuous,
+            StaticMode::CanAttackWithDefender,
+            StaticMode::Continuous,
+        ],
+        "control: the compound must fire; got {control:?}"
+    );
+
+    // SUBJECT — TWO defender segments, the second carrying trailing text. The loop
+    // bails on it and the whole compound declines, so the generic continuous parser
+    // claims the predicate and emits the `AddKeyword(Defender)` INVERSE as one fused
+    // element. That is the candidate's (and base's) behaviour, and it is what the
+    // loop-call-site mutation destroys.
+    let subject = p3e_generic_statics(&P3E_WALKING_BULWARK.replace(
+        "can attack as though it didn't have defender,",
+        "can attack as though it didn't have defender, can attack as though it didn't have defender quickly,",
+    ));
+    assert_eq!(
+        subject.len(),
+        1,
+        "the loop must apply the all-consuming policy to EVERY segment; got {subject:?}"
+    );
+    assert_eq!(subject[0].mode, StaticMode::Continuous);
+    assert!(
+        !subject
+            .iter()
+            .any(|d| d.mode == StaticMode::CanAttackWithDefender),
+        "no CanAttackWithDefender may be pushed for the trailing-text segment"
+    );
+}
+
+/// ROW 8, ARMS 3 / 7 / 9's EFFECT COUNTERPART: the effect-side
+/// adjacent grammars keep THEIR OWN parse.
+#[test]
+fn adjacent_defender_grammars_keep_their_own_parse_on_the_effect_side() {
+    // ARM 7 — the SEQUENCE SPLITTER (`combat_requirement_conjunct_prepend`), which
+    // re-attaches the subject so the conjunct RE-ENTERS production (c). Attributed by
+    // OUTPUT SHAPE: a `Pump` with a `sub_ability`, which the comma compound (a
+    // multi-element `static_abilities` vec) cannot produce.
+    //
+    // THE CONTROL HALF IS WHAT DISCRIMINATES THE TERMINATOR ARM: deleting
+    // `all_consuming_defender_tail`'s `opt(tag("."))` turns this parse from
+    // `Pump + sub_ability{CanAttackWithDefender}` into ONE bare
+    // `GenericEffect{CanAttackWithDefender}` with the `Pump` LOST, because
+    // `combat_requirement_conjunct_prepend` hands the predicate a conjunct that still
+    // carries its terminator. So BOTH facts are asserted: the `sub_ability` is
+    // present AND the outer effect is still the `Pump`.
+    //
+    // This row also MEASURES 8d's "no edit needed": the splitter emits nothing itself
+    // and reaches the shared recognizer through 8a, so the condition arrives from (c).
+    let seq = |text: &str| {
+        let p = parse_oracle_text(text, "Probe", &[], &["Instant".to_string()], &[]);
+        let ability = p.abilities.first().expect("an ability").clone();
+        let sub = ability
+            .sub_ability
+            .clone()
+            .expect("the sequence splitter must produce a sub_ability");
+        assert!(
+            matches!(ability.effect.as_ref(), Effect::Pump { .. }),
+            "the outer effect must still be the Pump; got {:?}",
+            ability.effect
+        );
+        match sub.effect.as_ref() {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => static_abilities.clone(),
+            other => panic!("expected a GenericEffect sub_ability, got {other:?}"),
+        }
+    };
+
+    let arm7_control =
+        seq("Target creature gets +2/+0 and can attack as though it didn't have defender.");
+    assert_eq!(arm7_control.len(), 1);
+    assert_eq!(arm7_control[0].mode, StaticMode::CanAttackWithDefender);
+    assert_eq!(arm7_control[0].condition, None);
+
+    let arm7_subject = seq(&format!(
+        "Target creature gets +2/+0 and can attack {P3E_SEG} as though it didn't have defender."
+    ));
+    assert_eq!(arm7_subject.len(), 1);
+    assert_eq!(arm7_subject[0].mode, StaticMode::CanAttackWithDefender);
+    assert_eq!(
+        arm7_subject[0].condition,
+        Some(p3e_anchored()),
+        "the re-attached conjunct must carry the interposed class's condition — \
+         a conjunct split off and rejoined without its gate is granted \
+         unconditionally"
+    );
+
+    // ARM 3 — the block-exception sibling on a targeted line. A too-greedy
+    // `can attack` scan destroys it.
+    let blocked = parse_oracle_text(
+        "Target creature can't be blocked this turn.",
+        "Probe",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let Some(Effect::GenericEffect {
+        static_abilities, ..
+    }) = blocked.abilities.first().map(|a| a.effect.as_ref())
+    else {
+        panic!(
+            "the block-exception sibling must keep its own parse; got {:?}",
+            blocked.abilities
+        );
+    };
+    assert_eq!(static_abilities.len(), 1);
+    assert_eq!(static_abilities[0].mode, StaticMode::CantBeBlocked);
+    assert_eq!(static_abilities[0].condition, None);
+
+    // ARM 9's EFFECT COUNTERPART — pinned as a ROUTING measurement, because arm 9
+    // itself must live on the STATIC side and a future author must not re-map a
+    // policy line to a fixture that cannot see it.
+    //
+    // **THE ROUTING IS TYPE-FRAME DEPENDENT, and that is measured here rather than
+    // assumed.** The same trailing-rider line goes two different ways depending on
+    // the card's type line, and NEITHER way reaches production (b)'s retained PREFIX
+    // policy — which is the property arm 9 exists to buy and the reason it cannot be
+    // bought from this file:
+    //
+    //  * CREATURE frame: the STATIC side claims the whole line first, so `abilities`
+    //    is EMPTY and production (c) is never offered it;
+    //  * INSTANT frame: the SEQUENCE SPLITTER splits at `" and "`, so the rider is
+    //    peeled into a `sub_ability` and the defender conjunct that re-enters (c)
+    //    carries no tail at all.
+    //
+    // Both verdicts were measured before this change in an isolated
+    // worktree and reproduce byte-identically at this candidate — the widening moves
+    // neither.
+    let creature_frame = parse_oracle_text(
+        "Target creature can attack as though it didn't have defender and it can't be blocked.",
+        "Probe",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(
+        creature_frame.abilities.is_empty(),
+        "CREATURE frame: the trailing-rider form is claimed by the static side, not by \
+         production (c); got {:?}",
+        creature_frame.abilities
+    );
+    assert!(
+        creature_frame
+            .statics
+            .iter()
+            .any(|d| d.mode == StaticMode::CantBeBlocked),
+        "CREATURE frame: and the static side's own verdict is unmoved; got {:?}",
+        creature_frame.statics
+    );
+
+    let instant_frame = parse_oracle_text(
+        "Target creature can attack as though it didn't have defender and it can't be blocked.",
+        "Probe",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let outer = instant_frame
+        .abilities
+        .first()
+        .expect("INSTANT frame: the sequence splitter must produce an ability");
+    assert!(
+        outer.sub_ability.is_some(),
+        "INSTANT frame: the `and it can't be blocked` rider is SPLIT OFF into a \
+         sub_ability, so the conjunct re-entering production (c) carries no tail"
+    );
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = outer.effect.as_ref()
+    else {
+        panic!(
+            "INSTANT frame: expected a GenericEffect, got {:?}",
+            outer.effect
+        );
+    };
+    assert_eq!(static_abilities.len(), 1);
+    assert_eq!(static_abilities[0].mode, StaticMode::CanAttackWithDefender);
+    assert_eq!(
+        static_abilities[0].condition, None,
+        "no interposed class is printed here, so the permission stays unconditioned"
+    );
+}
+
+/// CR 701.20a + CR 202.3: a reveal-until type list that shares ONE "card" head
+/// noun ("an instant, sorcery, or enchantment card with converted mana cost less
+/// than N" — Underdark Beholder; "a creature or land card with mana value 3 or
+/// less") applies the post-noun qualifier to every disjunct. A list of distinct
+/// card phrases (An Unearthly Child) keeps each disjunct's own filter.
+#[test]
+fn reveal_until_shared_card_qualifier_constrains_every_disjunct() {
+    fn disjuncts(filter: TargetFilter) -> Vec<TypedFilter> {
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected a disjunctive filter, got {filter:?}");
+        };
+        filters
+            .into_iter()
+            .map(|f| match f {
+                TargetFilter::Typed(typed) => typed,
+                other => panic!("expected typed disjuncts, got {other:?}"),
+            })
+            .collect()
+    }
+
+    let beholder = disjuncts(build_reveal_until_filter(
+        "instant, sorcery, or enchantment card with converted mana cost less than the number of eyestalk counters on ~",
+    ));
+    assert_eq!(
+        beholder
+            .iter()
+            .map(|t| t.type_filters.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            vec![TypeFilter::Instant],
+            vec![TypeFilter::Sorcery],
+            vec![TypeFilter::Enchantment]
+        ]
+    );
+    let bound = &beholder[2].properties;
+    assert!(
+        bound.iter().any(|p| matches!(
+            p,
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
+                ..
+            }
+        )),
+        "the enchantment disjunct carries the mana-value bound, got {bound:?}"
+    );
+    for typed in &beholder {
+        assert_eq!(&typed.properties, bound, "shared qualifier on {typed:?}");
+    }
+
+    let two_types = disjuncts(build_reveal_until_filter(
+        "creature or land card with mana value 3 or less",
+    ));
+    let three_or_less = FilterProp::Cmc {
+        comparator: Comparator::LE,
+        value: QuantityExpr::Fixed { value: 3 },
+    };
+    assert_eq!(two_types.len(), 2);
+    for typed in &two_types {
+        assert_eq!(typed.properties, vec![three_or_less.clone()], "{typed:?}");
+    }
+
+    // Distinct card phrases: the "with doctor's companion" qualifier belongs to
+    // its own disjunct only.
+    let child = disjuncts(build_reveal_until_filter(
+        "doctor card, a card with doctor's companion, or a vehicle card",
+    ));
+    assert_eq!(child.len(), 3);
+    assert_ne!(child[0].properties, child[1].properties);
+    assert_ne!(child[2].properties, child[1].properties);
+
+    // No "or": a comma list of adjectives on ONE card (Plargg, Dean of Chaos)
+    // is a single conjunctive filter, never a disjunction.
+    let plargg = build_reveal_until_filter("nonlegendary, nonland card with mana value 3 or less");
+    let TargetFilter::Typed(plargg) = plargg else {
+        panic!("expected one conjunctive typed filter, got {plargg:?}");
+    };
+    assert!(
+        plargg
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))),
+        "{plargg:?}"
+    );
+    assert!(plargg.properties.contains(&three_or_less), "{plargg:?}");
 }
