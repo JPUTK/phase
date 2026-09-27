@@ -114,11 +114,18 @@ fn resolve_preferring(runner: &mut GameRunner, preferred_source: ObjectId) {
             .iter()
             .position(|c| c.source_id == preferred_source && c.description != "Decline")
             .or_else(|| candidates.iter().position(|c| c.description == "Decline"))
-            .unwrap_or(0);
+            .unwrap_or_else(|| panic!("no preferred or Decline option, got {candidates:?}"));
         runner
             .act(GameAction::ChooseReplacement { index: idx })
             .expect("replacement choice must be accepted");
     }
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "replacement prompts did not resolve within the iteration bound"
+    );
 }
 
 /// The current `ReplacementChoice` prompt as `(source_id, description)` pairs,

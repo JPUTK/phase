@@ -398,10 +398,9 @@ fn printed_dredge_value(obj: &GameObject) -> Option<u32> {
 /// A card CAN carry a printed Dredge and a separately granted one at the same
 /// time — Dakmor Salvage (printed dredge 2) sitting in a graveyard while The
 /// Necrobloom's "Land cards in your graveyard have dredge 2" is on the
-/// battlefield is exactly that case. Nothing in CR 702.52 (verified against
-/// `docs/MagicCompRules.txt`: 702.52a defines Dredge, 702.52b covers an
-/// insufficient library — neither says anything about multiple instances)
-/// collapses two differently-sourced Dredge abilities on one card into a
+/// battlefield is exactly that case. Neither CR 702.52a (Dredge) nor
+/// CR 702.52b (insufficient library) says anything about multiple instances;
+/// neither collapses two differently-sourced Dredge abilities on one card into a
 /// single value. The printed-value comparison below is therefore only a
 /// REDUNDANCY test, never by itself a reason to suppress the granted
 /// candidate.
