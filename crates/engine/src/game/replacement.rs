@@ -903,13 +903,18 @@ pub enum ApplyResult {
 /// continuation runs, so it is not "pending work" and the inner stash installs
 /// above it.
 ///
-/// The discard only fires for **sibling** events (two combat-damage instances in one
+/// The discard fires for **sibling** events (two combat-damage instances in one
 /// batch, CR 510.2; two coin flips of one instruction), where the same definition is
 /// applied once to each — which CR 614.5 licenses, since it grants one opportunity
 /// *per event*. Those sibling continuations are never dispatched today, so nothing
-/// observable is lost; the discard keeps an un-dispatchable drain from pinning
-/// `has_ready()` true forever. That they are stashed at all is the real defect
-/// (issue #5676). See [`ResidentDrainPolicy`] for the measured census.
+/// observable is lost there. It also fires for same-event collisions outside the
+/// measured census: two Blood Scriveners on one empty-hand draw (by trace, not run),
+/// or A → declined optional B → C on one event, where C's stash meets A's kept Ready
+/// rider. Those drop a real rider: the stack holds at most one Ready entry, which is
+/// recorded in the accept-side follow-up on PR #9235. For siblings, the discard
+/// keeps an un-dispatchable drain from pinning `has_ready()` true forever. That they
+/// are stashed at all is the real defect (issue #5676). See [`ResidentDrainPolicy`]
+/// for the measured census.
 fn stash_post_replacement_continuation(
     state: &mut GameState,
     continuation: PostReplacementContinuation,
@@ -1669,9 +1674,12 @@ fn replacement_choice_label_for_rid(state: &GameState, rid: ReplacementId) -> St
         // value: `continue_replacement_impl`'s accept path is the one that
         // must not synthesize a "Dredge 0" definition from this same `None`.
         return match granted_dredge_value(state, rid.source) {
-            Some(n) => format!(
-                "Dredge {n}: mill {n} cards and return this card from graveyard to hand instead of drawing"
-            ),
+            Some(n) => {
+                let cards = if n == 1 { "card" } else { "cards" };
+                format!(
+                    "Dredge {n}: mill {n} {cards} and return this card from graveyard to hand instead of drawing"
+                )
+            }
             None => "Dredge: mill and return this card from graveyard to hand instead of drawing"
                 .to_string(),
         };
@@ -8249,12 +8257,13 @@ pub fn find_applicable_replacements(
                 // it for the printed path when `draw_is_substituted_away` classifies
                 // the accept as a substitution — no further dredge is applicable
                 // to it. Without this gate the CR 616.1f re-scan re-offered every
-                // OTHER granted-dredge graveyard card against the dead draw, and
-                // answering that stray prompt either abandoned the accepted
-                // dredge's post-replacement continuation (decline: no draw, no
-                // mill, no return) or overwrote it with the sibling's (accept: the
-                // chosen card lost, the sibling dredged) — both CR 614.5
-                // violations.
+                // OTHER granted-dredge graveyard card against the replaced draw —
+                // a prompt CR 614.6 + CR 616.1f forbid, since no dredge "would
+                // now be applicable". Accepting that stray prompt overwrote the
+                // chosen dredge's continuation with the sibling's
+                // (`ResidentDrainPolicy::Replace`: the chosen card lost, the
+                // sibling dredged); declining it leaves the chosen continuation
+                // resident, so the stray prompt itself is the violation.
                 //
                 // Called PER CANDIDATE with that candidate's own source, exactly as
                 // the two sibling scans call it with `obj.id` / `source_host` (see
@@ -11412,10 +11421,9 @@ fn continue_replacement_impl(
         // CR 614.12a: Optional accept/decline branches always derive a Template
         // continuation — the post-effect is built from the ReplacementDefinition's
         // `execute`/`decline` AST, never from a captured runtime resolution.
-        // Set BEFORE `apply_single_replacement` so per-event appliers (e.g.,
-        // `draw_applier`) can see the continuation slot and suppress the
-        // original event when its replacement is a non-modifier chain
-        // (CR 614.6: the draw never happens when fully replaced).
+        // No applier reads the drain stack (production `replacement.rs` reads it
+        // only in `replace_combat_damage_batch`); draw substitution is classified
+        // from the branch AST by `draw_is_substituted_away`.
         // CR 614.12a + CR 616.1: Seed the inherited replacement-applied set ONLY
         // when this replacement originates a token-choice continuation (Jinnie
         // Fay-class `CreateToken -> ChooseOneOf(Token, Token)`). The seed is
@@ -11444,36 +11452,30 @@ fn continue_replacement_impl(
                 state.post_replacement_token_substitution_count = Some(*count as i32);
             }
         }
-        // CR 614.6: install (or clear) the optional branch's continuation — the
-        // replacement's own actions for the branch that was taken.
+        // CR 614.6: install the optional branch's continuation (the replacement's
+        // own actions for the branch that was taken); a no-post-effect ACCEPT
+        // clears the resident drains, a no-post-effect DECLINE leaves them
+        // untouched.
         //
         // Policy is `Replace`: unlike `stash_post_replacement_continuation`, this
         // path has always OVERWRITTEN a resident continuation rather than
         // discarding the incoming one. The two policies genuinely disagree; both
-        // are preserved exactly here, and naming them is the point.
+        // are preserved exactly here, and naming them is the point. `Replace`
+        // evicts a Ready resident — on the same event that drops an earlier
+        // replacement's rider (the accept-side follow-up recorded on PR #9235);
+        // on a DECLINE this arm loses a drain only when the decline branch has a
+        // post-effect.
         //
-        // Open question (deferred, NOT resolved here): on a DECLINE this path's
-        // sibling arm (`None => abandon_active_post_replacement_drains`) drops a
-        // resident continuation installed by an earlier accepted candidate. For
-        // an accepted DREDGE this is now unreachable: the accept zeroes the
-        // draw's count (`apply_granted_dredge_replacement` / the printed path's
-        // `draw_is_substituted_away`) and the registration gate in
-        // `find_applicable_replacements`'s granted-dredge block (CR 616.1f /
-        // CR 614.6) then stops any sibling from being re-offered. It is NOT
-        // closed in general — not even for Draw: `draw_is_substituted_away`
-        // classifies a rescaled or same-player `Effect::Draw` accept as a
-        // SURVIVING draw while this path still installs its continuation, so a
-        // non-dredge optional Draw replacement can leave `count > 0` with a
-        // drain resident and a legitimately co-applicable sibling (CR 616.1f).
-        // That shape, and any event family whose applier MODIFIES rather than
-        // annihilates its event, is unmeasured; see the PR's follow-up note.
+        // #5686/#6269 ported the single slot's `continuation = post_effect` +
+        // `applied.clear()` into this stack; the `None` half of that plain
+        // assignment was never a designed cleanup.
         //
         // CR 615.5 + CR 609.7: an optional/decline post-effect carries no
         // prevention-event-source semantics, so `event_source`/`event_target` are
         // empty — a prior prevention must not leak into a non-prevention drain.
         // The drain owns those fields, so replacing it clears them by construction.
-        match post_effect {
-            Some(def) => {
+        match (branch, post_effect) {
+            (ReplacementBranch::Execute | ReplacementBranch::Decline, Some(def)) => {
                 state.install_post_replacement_drain(
                     PostReplacementDrain {
                         status: DrainStatus::Ready(PostReplacementContinuation::Template(def)),
@@ -11489,10 +11491,35 @@ fn continue_replacement_impl(
                     ResidentDrainPolicy::Replace,
                 );
             }
-            // No post-effect: this branch produces no continuation, so any resident
-            // one (and the `applied` set that rode with it) is dropped — exactly
-            // what `continuation = None` + `applied.clear()` did before.
-            None => state.abandon_active_post_replacement_drains(),
+            // CR 614.6 + CR 616.1f: a declined optional — or a MayCost left
+            // unpaid — whose branch has no post-effect replaces nothing, so every
+            // resident drain stays exactly as found. An earlier replacement
+            // already applied to this event keeps its rider: its modified event
+            // still happens (e.g. Blood Scrivener's "lose 1 life" after a
+            // declined dredge — CR 702.52a's "may"). An outer paused
+            // continuation keeps its event context (CR 616.1g). This matches
+            // `pipeline_loop`'s chooser-less decline, the no-payer arm above,
+            // `continue_search_found_after_decline`, and the mandatory ordering
+            // pick below, none of which touch the drain stack. A kept Ready
+            // drain is dispatched as this event completes, exactly like one
+            // left by a mandatory ordering pick: for a draw at the first drawn
+            // card's zone-delivery tail, or at the resume epilogue if no card is
+            // delivered; for a zone change at `handle_replacement_choice`'s
+            // `CallerEpilogue` drain; a Paused one is retired by its own
+            // dispatch lifecycle.
+            (ReplacementBranch::Decline, None) => {}
+            // Accept with no post-effect (Obstinate Familiar's skip, a shock
+            // land's paid life): unchanged, it still abandons the resident
+            // drains. (A MayCost life payment first runs
+            // `drain_substitution_continuation`, which dispatches any Ready
+            // resident as the payment's own substitute before this arm is
+            // reached — or instead of it, re-parking this record, when that
+            // dispatch prompts.) Whether an earlier rider survives an accepted
+            // substitution depends on the rider (CR 614.11b + CR 121.6c: an
+            // additional action on a replaced draw's card is not performed;
+            // Blood Scrivener's life loss is not such an action), so both are
+            // the accept-side follow-up recorded on PR #9235.
+            (ReplacementBranch::Execute, None) => state.abandon_active_post_replacement_drains(),
         }
 
         match apply_single_replacement_and_dirty(state, proposed, rid, branch, registry, events) {
@@ -16077,6 +16104,236 @@ mod tests {
             spent_candidates.is_empty(),
             "CR 614.6 + CR 616.1f: a draw that was replaced never happens, so no \
              dredge candidate may be registered against it, got {spent_candidates:?}"
+        );
+    }
+
+    /// The seam of the no-post-effect decline, driven through
+    /// `replace_event` / `continue_replacement` with a Ready LoseLife drain
+    /// seeded as a Blood Scrivener-shaped earlier rider (its `event_target`
+    /// names the drawer).
+    ///
+    /// Decline half: CR 614.6 + CR 616.1f — declining the dredge (CR 702.52a's
+    /// "may") replaces nothing, so the resident rider must still be there.
+    ///
+    /// Accept half: a characterization of the unchanged `Some` arm, not a rules
+    /// claim. Accepting installs the dredge's Mill continuation with
+    /// `ResidentDrainPolicy::Replace`, which evicts the seed (the accept-side
+    /// follow-up recorded on PR #9235). It runs first so a failing decline half
+    /// cannot hide it.
+    #[test]
+    fn optional_decline_without_post_effect_keeps_resident_drain_and_accept_still_replaces_it() {
+        use crate::types::game_state::PostReplacementDrainStack;
+
+        fn lose_one_life() -> AbilityDefinition {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::LoseLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: None,
+                },
+            )
+        }
+
+        fn seeded_dredge_prompt() -> GameState {
+            let mut state = dredge_state(3);
+            let mut events = Vec::new();
+            let result = replace_event(
+                &mut state,
+                ProposedEvent::Draw {
+                    player_id: PlayerId(0),
+                    count: 1,
+                    stage: DrawEventStage::Individual,
+                    applied: HashSet::new(),
+                },
+                &mut events,
+            );
+            assert_eq!(
+                result,
+                ReplacementResult::NeedsChoice(PlayerId(0)),
+                "reach-guard: the lone printed dredge must park its accept/decline choice"
+            );
+            let installed = state.install_post_replacement_drain(
+                PostReplacementDrain {
+                    status: DrainStatus::Ready(PostReplacementContinuation::Template(Box::new(
+                        lose_one_life(),
+                    ))),
+                    source: None,
+                    applied: HashSet::new(),
+                    event_source: None,
+                    event_target: Some(TargetRef::Player(PlayerId(0))),
+                    controller: Some(PlayerId(0)),
+                },
+                ResidentDrainPolicy::KeepResident,
+            );
+            assert!(installed, "reach-guard: the seed rider must be resident");
+            state
+        }
+
+        // Accept half (unchanged `Some` arm).
+        let mut state = seeded_dredge_prompt();
+        let mut events = Vec::new();
+        let result = continue_replacement(&mut state, 0, &mut events);
+        assert!(
+            matches!(
+                result,
+                ReplacementResult::Execute(ProposedEvent::Draw { count: 0, .. })
+            ),
+            "CR 702.52a: an accepted dredge substitutes the draw away, got {result:?}"
+        );
+        let drains = state
+            .active_post_replacement_drains_mut()
+            .expect("the accepted dredge installs its continuation");
+        assert!(
+            matches!(
+                drains.resident().and_then(PostReplacementDrain::ready_continuation),
+                Some(PostReplacementContinuation::Template(def))
+                    if matches!(*def.effect, Effect::Mill { .. })
+            ),
+            "the accepted dredge's Mill continuation must be resident"
+        );
+        assert!(
+            drains.begin_dispatch().is_some(),
+            "reach-guard: the Mill continuation is Ready"
+        );
+        assert!(
+            !drains.has_ready(),
+            "ResidentDrainPolicy::Replace evicts the Ready seed on an accept with a \
+             post-effect"
+        );
+
+        // Decline half (the fix).
+        let mut state = seeded_dredge_prompt();
+        let mut events = Vec::new();
+        let result = continue_replacement(&mut state, 1, &mut events);
+        assert!(
+            matches!(
+                result,
+                ReplacementResult::Execute(ProposedEvent::Draw { count: 1, .. })
+            ),
+            "a declined dredge leaves the draw to happen, got {result:?}"
+        );
+        assert_eq!(
+            state
+                .active_post_replacement_drains()
+                .and_then(PostReplacementDrainStack::resident)
+                .and_then(PostReplacementDrain::ready_continuation),
+            Some(&PostReplacementContinuation::Template(Box::new(
+                lose_one_life()
+            ))),
+            "CR 614.6 + CR 616.1f: a declined optional with no post-effect must keep \
+             the resident rider"
+        );
+    }
+
+    /// A graveyard card whose OWN base static grants it Dredge `n` — the
+    /// fixture of `base_statics_half_sees_a_self_granting_graveyard_card`
+    /// (`off_zone_characteristics.rs`) — with three library cards for P0.
+    fn self_granting_dredge_state(n: u32) -> (GameState, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let card = crate::game::zones::create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Dredging Spawn".to_string(),
+            Zone::Graveyard,
+        );
+        for i in 0..3 {
+            crate::game::zones::create_object(
+                &mut state,
+                CardId(901 + i),
+                PlayerId(0),
+                format!("Library Card {i}"),
+                Zone::Library,
+            );
+        }
+        let obj = state.objects.get_mut(&card).unwrap();
+        std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(
+            crate::types::ability::StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Dredge(n),
+                }]),
+        );
+        let base_static_definitions = obj.base_static_definitions.clone();
+        obj.static_definitions = (*base_static_definitions).clone().into();
+        (state, card)
+    }
+
+    /// F4 — CR 613.1f + CR 113.6b: the base-statics half of the granted-dredge
+    /// registration guard. The only Dredge grant on the board is the card's
+    /// own base static, which the shared half cannot see, so only
+    /// `base_statics_can_grant_off_zone_keyword_kind` lets the candidate
+    /// register.
+    #[test]
+    fn granted_dredge_registration_offers_a_card_whose_own_base_static_grants_dredge() {
+        use crate::game::off_zone_characteristics::{
+            base_statics_can_grant_off_zone_keyword_kind,
+            shared_effects_can_grant_off_zone_keyword_kind,
+        };
+        use crate::types::keywords::KeywordKind;
+
+        let (state, card) = self_granting_dredge_state(2);
+        assert!(
+            !shared_effects_can_grant_off_zone_keyword_kind(&state, KeywordKind::Dredge),
+            "reach-guard: the shared half must not see the self-grant"
+        );
+        assert!(
+            base_statics_can_grant_off_zone_keyword_kind(&state, card, KeywordKind::Dredge),
+            "reach-guard: the base-statics half must see the self-grant"
+        );
+
+        let registry = build_replacement_registry();
+        let draw = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 1,
+            stage: DrawEventStage::Individual,
+            applied: HashSet::new(),
+        };
+        let candidates = find_applicable_replacements(&state, &draw, &registry);
+        assert!(
+            candidates.contains(&granted_dredge_replacement_id(card)),
+            "CR 702.52a: a card whose own base static grants Dredge must be offered, \
+             got {candidates:?}"
+        );
+
+        // Negative sibling: the same card with no static offers nothing.
+        let mut bare = GameState::new_two_player(42);
+        let bare_card = crate::game::zones::create_object(
+            &mut bare,
+            CardId(900),
+            PlayerId(0),
+            "Plain Card".to_string(),
+            Zone::Graveyard,
+        );
+        for i in 0..3 {
+            crate::game::zones::create_object(
+                &mut bare,
+                CardId(901 + i),
+                PlayerId(0),
+                format!("Library Card {i}"),
+                Zone::Library,
+            );
+        }
+        let bare_candidates = find_applicable_replacements(&bare, &draw, &registry);
+        assert!(
+            !bare_candidates.contains(&granted_dredge_replacement_id(bare_card)),
+            "a graveyard card with no grant must not be offered, got {bare_candidates:?}"
+        );
+    }
+
+    /// F1 — the granted label pluralizes its own count: "mill 1 card", never
+    /// "mill 1 cards".
+    #[test]
+    fn granted_dredge_label_pluralizes_a_count_of_one() {
+        let (state, card) = self_granting_dredge_state(1);
+        let label = replacement_choice_label_for_rid(&state, granted_dredge_replacement_id(card));
+        assert!(
+            label.contains("Dredge 1"),
+            "reach-guard: the label must come from the live granted value, got {label:?}"
+        );
+        assert!(
+            label.contains("mill 1 card and") && !label.contains("1 cards"),
+            "a count of one must read \"mill 1 card\", got {label:?}"
         );
     }
 

@@ -1114,6 +1114,7 @@ mod omniscience_free_cast_vexing_bauble;
 mod omo_queen_of_vesuva;
 mod onakke_oathkeeper;
 mod one_sided_fight_illegal_damage_source;
+mod optional_replacement_decline_keeps_resident_drain;
 mod oracle_parser;
 mod orzhov_advokist;
 mod other_than_attached_host_exclusion;

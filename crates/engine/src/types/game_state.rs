@@ -21493,6 +21493,10 @@ pub struct PostReplacementDrain {
     /// time. It is co-owned, not merely co-located. (The reading that it has an
     /// independent lifecycle comes from looking at the *instant* of the
     /// `combat_damage` clear rather than its *purpose*; that reading is wrong.)
+    ///
+    /// Since PR #9235, only the no-post-effect optional ACCEPT still clears (via
+    /// `abandon_active_post_replacement_drains`); a no-post-effect DECLINE
+    /// installs nothing and clears nothing (CR 614.6 + CR 616.1f).
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub applied: HashSet<AppliedReplacementKey>,
 
@@ -21535,11 +21539,20 @@ pub struct PostReplacementDrain {
 ///
 ///   * [`Self::KeepResident`] — `apply_single_replacement`'s stash: the *incoming*
 ///     continuation is discarded.
-///   * [`Self::Replace`] — the optional accept/decline path and the combat
-///     prevention riders: the *resident* continuation is overwritten.
+///   * [`Self::Replace`] — the optional accept/decline path when the chosen
+///     branch HAS a post-effect, and the combat prevention riders: the
+///     *resident* continuation is overwritten.
 ///
 /// Naming them is the point: today the policy is an accident of where the
 /// assignment happens to sit.
+///
+/// # A branch with no post-effect installs nothing
+///
+/// When the optional accept/decline path's chosen branch has no post-effect, no
+/// policy applies. On a DECLINE the resident drains are left untouched
+/// (CR 614.6 + CR 616.1f: a declined "may" replaces nothing, so an earlier
+/// replacement's rider on the same event still runs). On an ACCEPT they are
+/// still abandoned — the accept-side follow-up recorded on PR #9235.
 ///
 /// # What the `KeepResident` drop actually is — measured, not inferred
 ///
@@ -21562,7 +21575,11 @@ pub struct PostReplacementDrain {
 ///     exactly once, which is what CR 614.5 licenses — it grants one opportunity *per
 ///     event*, and there are two events. The applied-set dedup is fully wired
 ///     (`already_applied` gates candidate selection) and correctly declines to
-///     suppress here. Nothing is missing from this path.
+///     suppress here. Nothing is missing from this path. In that census both
+///     drops were sibling events; same-event collisions are also reachable (two
+///     Blood Scriveners; A → declined B → C) and lose a real rider, because the
+///     stack holds at most one Ready entry — the accept-side follow-up recorded
+///     on PR #9235.
 ///   * **The dropped continuation never runs — in either regime.** Dispatch counts are
 ///     identical with the drop and with the stack forced to nest: Wolverine dispatches
 ///     its continuation **zero** times ever (its heal is delivered by
@@ -21606,8 +21623,9 @@ pub enum ResidentDrainPolicy {
 
 /// CR 616.1g: the post-replacement continuations awaiting a drain.
 ///
-/// Depth is currently capped at one by [`ResidentDrainPolicy`] — this type
-/// reproduces the old single-slot behaviour exactly. It is a stack so that
+/// [`ResidentDrainPolicy`] keeps at most one Ready entry — this type reproduces
+/// the old single-slot behaviour exactly, except that a no-post-effect optional
+/// decline no longer clears it (PR #9235). It is a stack so that
 /// nesting can be turned on as an isolated, reviewable change rather than as a
 /// side effect of the bundling.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -21828,7 +21846,10 @@ impl PostReplacementDrainStack {
         }
     }
 
-    /// CR 800.4a: abandon every pending continuation (player departure).
+    /// Abandon every pending continuation. Two callers: player departure via
+    /// `GameState::abandon_active_replacement_tails` (CR 800.4a), and the
+    /// no-post-effect optional ACCEPT via
+    /// `GameState::abandon_active_post_replacement_drains`.
     pub fn abandon_all(&mut self) {
         self.drains.clear();
     }
@@ -24123,6 +24144,10 @@ impl GameState {
 
     /// Clears only the exact active general post-replacement authority. This
     /// preserves any independent active child that may be resolving above it.
+    ///
+    /// Its only production caller is `continue_replacement_impl`'s
+    /// no-post-effect ACCEPT; the no-post-effect DECLINE deliberately does not
+    /// call it (CR 614.6 + CR 616.1f).
     pub fn abandon_active_post_replacement_drains(&mut self) {
         if let Some(drains) = self.active_post_replacement_drains_mut() {
             drains.abandon_all();

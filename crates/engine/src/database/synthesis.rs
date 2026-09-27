@@ -3173,9 +3173,10 @@ pub(crate) fn dredge_replacement_definition(n: u32) -> ReplacementDefinition {
     // CR 616.1: a printed and a differently-valued GRANTED dredge candidate can
     // co-occur on one card in a single ordering prompt, so this label must show
     // its own N (the granted label interpolates its own value the same way).
+    let cards = if n == 1 { "card" } else { "cards" };
     replacement.description = Some(format!(
-        "CR 702.52a: Dredge — instead of drawing, you may mill {n} cards and return this \
-         card from your graveyard to your hand."
+        "CR 702.52a: Dredge — instead of drawing, you may mill {n} {cards} and return \
+         this card from your graveyard to your hand."
     ));
     replacement.execute = Some(Box::new(mill));
     replacement
@@ -11933,6 +11934,26 @@ mod madness_synthesis_tests {
         face.keywords.push(Keyword::Flying);
         synthesize_dredge(&mut face);
         assert!(face.replacements.is_empty());
+    }
+
+    /// F1 — the printed label pluralizes its own count: Dredge 1 (Shenanigans,
+    /// Grave-Shell Scarab) reads "mill 1 card", never "mill 1 cards".
+    #[test]
+    fn dredge_description_pluralizes_its_own_count() {
+        assert_eq!(
+            dredge_replacement_definition(1).description.as_deref(),
+            Some(
+                "CR 702.52a: Dredge — instead of drawing, you may mill 1 card and return \
+                 this card from your graveyard to your hand."
+            )
+        );
+        assert_eq!(
+            dredge_replacement_definition(3).description.as_deref(),
+            Some(
+                "CR 702.52a: Dredge — instead of drawing, you may mill 3 cards and return \
+                 this card from your graveyard to your hand."
+            )
+        );
     }
 }
 

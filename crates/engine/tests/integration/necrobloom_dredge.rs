@@ -220,7 +220,7 @@ fn necrobloom_dredge_requires_necrobloom_on_battlefield() {
 }
 
 /// Row 1 hostile fixture: Necrobloom's grant is scoped to "your graveyard"
-/// (Necrobloom's controller, P0's, per CR 611.3b — live, not latched). A land
+/// (Necrobloom's controller, P0's, per CR 109.5 + CR 611.3a — live, not latched). A land
 /// with no printed Dredge sitting in P1's OWN graveyard must not receive the
 /// grant even though P1 is the one drawing — proving the static's own
 /// controller-relative filter resolution is correct, not merely that
@@ -247,6 +247,51 @@ fn necrobloom_dredge_does_not_cross_into_opponents_graveyard() {
         hand_len(&runner, P1),
         hand_before + 1,
         "P1's draw must proceed normally"
+    );
+}
+
+/// Row 1 owner scoping: the grantee's OWN land (P0's Forest, which Necrobloom
+/// really grants dredge to) must not be offered against an OPPONENT's draw.
+/// CR 702.52a: dredge replaces a draw of "you", the land's owner, so the
+/// registration loop reads only the drawing player's graveyard. The reach-guard
+/// then shows the same land IS offered on P0's own draw.
+#[test]
+fn necrobloom_dredge_not_offered_on_opponents_draw_for_the_grantees_own_land() {
+    let mut scenario = base_scenario();
+    scenario.add_creature_from_oracle(P0, "The Necrobloom", 2, 7, NECROBLOOM_ORACLE);
+    let land = scenario.add_land_to_graveyard(P0, "Forest").id();
+    let mut runner = scenario.build();
+    let p1_hand_before = hand_len(&runner, P1);
+
+    draw_one(&mut runner, P1);
+
+    assert!(
+        replacement_prompt(&runner).is_none(),
+        "P0's granted dredge must not be offered on P1's draw, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        hand_len(&runner, P1),
+        p1_hand_before + 1,
+        "P1's draw must proceed normally"
+    );
+    assert_eq!(
+        zone_of(&runner, land),
+        Zone::Graveyard,
+        "the grantee's land must stay in P0's graveyard"
+    );
+
+    // Reach-guard: the same land really carries the grant on its owner's draw.
+    draw_one(&mut runner, P0);
+    let prompt = replacement_prompt(&runner).unwrap_or_else(|| {
+        panic!(
+            "reach-guard: P0's own draw must offer the granted dredge, got {:?}",
+            runner.state().waiting_for
+        )
+    });
+    assert!(
+        prompt.iter().all(|(source, _)| *source == land),
+        "reach-guard: the offer must be attributed to P0's Forest, got {prompt:?}"
     );
 }
 
@@ -563,6 +608,17 @@ fn necrobloom_land_with_differing_printed_dredge_offers_both_candidates() {
             .any(|(_, description)| description.starts_with("CR 702.52a")),
         "the object-carried printed candidate must keep its synthesized label, got {prompt:?}"
     );
+    assert!(
+        prompt[granted_idx].1.contains("mill 2"),
+        "CR 702.52a: the granted label must show its own mill count, got {prompt:?}"
+    );
+    assert!(
+        prompt
+            .iter()
+            .filter(|(_, description)| description.starts_with("CR 702.52a"))
+            .all(|(_, description)| description.contains("mill 3")),
+        "CR 702.52a: the printed label must show its own mill count, got {prompt:?}"
+    );
     assert_ne!(
         prompt[0].1, prompt[1].1,
         "the two same-object candidates must read distinctly in the ordering prompt"
@@ -689,11 +745,11 @@ fn necrobloom_land_with_differing_printed_dredge_accepting_the_printed_one_retur
     assert_eq!(
         runner.state().players[0].library.len(),
         library_before - 3,
-        "CR 702.52b: the PRINTED candidate's own count (3) must be milled, not the granted 2"
+        "CR 702.52a: the PRINTED candidate's own count (3) must be milled, not the granted 2"
     );
 }
 
-/// CR 121.2a + CR 121.6b: a 2-card draw instruction (two INDIVIDUAL draw
+/// CR 121.2 + CR 121.6b: a 2-card draw instruction (two INDIVIDUAL draw
 /// units) with a granted-dredge land in the graveyard — the granted-mechanism
 /// sibling of `multi_draw_dredges_one_of_two_units_other_draws_normally`
 /// (`crates/engine/src/game/replacement.rs`), which covers the identical
@@ -714,18 +770,15 @@ fn necrobloom_land_with_differing_printed_dredge_accepting_the_printed_one_retur
 /// from one grant, in both accept directions across printed and granted
 /// candidate kinds) is a first-class coverage axis of this module.
 ///
-/// Still open and unmeasured (deferred, not claimed safe): on a DECLINE,
-/// `continue_replacement_impl`'s `abandon_active_post_replacement_drains` arm
-/// drops a resident continuation installed by an earlier accepted candidate,
-/// and its `ResidentDrainPolicy::Replace` arm overwrites one. Only the dredge
-/// multi-candidate defect on Draw is closed here — not the Draw event in
-/// general, because `draw_is_substituted_away` classifies a rescaled or
-/// same-player `Effect::Draw` accept as a SURVIVING draw, which can leave
-/// `count > 0` with a drain resident and a CR 616.1f-legitimate sibling. The
-/// same question stands for any accept whose applier modifies rather than
-/// annihilates its event. It is recorded here, at the `Replace`-policy comment
-/// in `crates/engine/src/game/replacement.rs`, and in the PR body as a
-/// follow-up.
+/// The no-post-effect DECLINE half is resolved: `continue_replacement_impl`
+/// installs nothing and clears nothing when a declined optional's branch has no
+/// post-effect, so every resident drain stays (CR 614.6 + CR 616.1f), pinned by
+/// `optional_replacement_decline_keeps_resident_drain.rs`. Two halves remain
+/// open: a decline whose branch HAS a post-effect still installs with
+/// `ResidentDrainPolicy::Replace` and evicts a same-event Ready rider, and the
+/// accept side (a no-post-effect accept still abandons the resident drains; a
+/// post-effect accept still replaces them). Both are the accept-side follow-up
+/// recorded on PR #9235 (items 1–3).
 #[test]
 fn necrobloom_multi_draw_dredges_granted_land_other_draw_proceeds_normally() {
     let mut scenario = base_scenario();
@@ -886,11 +939,12 @@ fn necrobloom_removed_mid_choice_stale_accept_degrades_to_normal_draw() {
 /// prompt — the accepted dredge substituted the draw away (CR 614.6), so under
 /// CR 616.1f no other dredge "would now be applicable".
 ///
-/// Before the registration gate, the sibling was re-offered against the dead
-/// draw and answering that stray prompt either abandoned the accepted dredge's
-/// continuation (decline: no draw, no mill, no return) or overwrote it with the
-/// sibling's (accept: the chosen land lost) — both CR 614.5 violations. The
-/// `Zone::Hand` assertion below is what flips back to `Graveyard` on a revert.
+/// Before the registration gate, the sibling was re-offered against the
+/// replaced draw — a prompt CR 614.6 + CR 616.1f forbid. Since the
+/// no-post-effect decline fix (PR #9235), declining that stray prompt no longer
+/// abandons the accepted dredge's continuation, so `Zone::Hand` alone no longer
+/// catches a gate revert. The immediate leftover-prompt check right after the
+/// accept does: the stray prompt itself is the violation.
 #[test]
 fn necrobloom_two_granted_dredge_lands_accepting_one_leaves_the_other_in_graveyard() {
     let mut scenario = base_scenario();
@@ -916,8 +970,38 @@ fn necrobloom_two_granted_dredge_lands_accepting_one_leaves_the_other_in_graveya
         2,
         "both graveyard lands must surface as granted-dredge candidates, got {prompt:?}"
     );
+    let order_idx = prompt
+        .iter()
+        .position(|(source, _)| *source == accepted)
+        .unwrap_or_else(|| panic!("the chosen land must be orderable, got {prompt:?}"));
+    runner
+        .act(GameAction::ChooseReplacement { index: order_idx })
+        .expect("order-picking the chosen land must be accepted");
 
-    resolve_preferring(&mut runner, accepted);
+    let prompt = replacement_prompt(&runner).unwrap_or_else(|| {
+        panic!(
+            "expected the chosen land's accept/decline prompt, got {:?}",
+            runner.state().waiting_for
+        )
+    });
+    assert!(
+        prompt.iter().all(|(source, _)| *source == accepted),
+        "the accept/decline prompt must be attributed to the chosen land, got {prompt:?}"
+    );
+    let accept_idx = prompt
+        .iter()
+        .position(|(_, description)| description != "Decline")
+        .unwrap_or_else(|| panic!("the chosen land must offer an accept option, got {prompt:?}"));
+    runner
+        .act(GameAction::ChooseReplacement { index: accept_idx })
+        .expect("accepting the chosen land's dredge must be accepted");
+    let stray = replacement_prompt(&runner);
+    assert!(
+        stray.is_none(),
+        "CR 614.6 + CR 616.1f: no sibling may be re-offered against the replaced draw, \
+         got {stray:?}"
+    );
+
     runner.advance_until_stack_empty();
 
     assert_eq!(
@@ -1421,7 +1505,7 @@ fn necrobloom_two_granted_plus_printed_accepting_the_printed_one_reoffers_neithe
     );
 }
 
-/// Matrix row 6 — CR 121.2 + CR 121.2a: a 2-card draw instruction is two
+/// Matrix row 6 — CR 121.2: a 2-card draw instruction is two
 /// INDIVIDUAL draw units, and the gate must be scoped to the unit whose count
 /// was consumed. Unit 1 offers both granted lands and accepts A; unit 2 is a
 /// FRESH event with `count == 1`, so B must be offered there and accepted
@@ -1489,7 +1573,7 @@ fn necrobloom_two_granted_two_card_draw_one_per_unit() {
     // Unit 2 is a fresh individual draw (CR 121.2), so B must be offered.
     let prompt = replacement_prompt(&runner).unwrap_or_else(|| {
         panic!(
-            "CR 121.2 + CR 121.2a: unit 2 is a fresh draw and must still offer B, got {:?}",
+            "CR 121.2: unit 2 is a fresh draw and must still offer B, got {:?}",
             runner.state().waiting_for
         )
     });
