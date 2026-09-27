@@ -607,8 +607,10 @@ fn parse_rounding_sentence(input: &str) -> Option<(&str, RoundingMode)> {
 ///
 /// [`Colors`](AdditiveSuffix::Colors) represents the "colors"-only carve-out (a
 /// carve-out that adds color but still replaces creature subtypes: "it's a 4/4
-/// blue in addition to its other colors" — Sephiroth, One-Winged Angel). A prior
-/// draft of this fix widened [`split_in_addition_tail`]'s shared marker
+/// blue in addition to its other colors" — a synthetic class input; no printed
+/// card currently pairs a colors-only carve-out with a P/T copy-exception
+/// body — Higher Level Zone Monster's colors-only exception has no "a N/M"
+/// head). A prior draft of this fix widened [`split_in_addition_tail`]'s shared marker
 /// (`animation.rs`) to also match "in addition to its other colors" (no
 /// trailing "types") so this arm could represent that carve-out — but that
 /// marker is the single authority `has_in_addition_to_other_types`/
@@ -631,9 +633,9 @@ fn parse_rounding_sentence(input: &str) -> Option<(&str, RoundingMode)> {
 /// spanning files outside this fix's scope, not a contained one.
 ///
 /// Instead, [`parse_colors_only_in_addition_tail`] is a FILE-LOCAL combinator
-/// (used only by the two P/T-and-types arms below) that recognises exactly the
-/// "colors"-only marker without touching the shared `animation.rs` authority
-/// or its other consumers.
+/// (reached only through [`split_carve_out_tail`]'s fallback below) that
+/// recognises exactly the "colors"-only marker without touching the shared
+/// `animation.rs` authority or its other consumers.
 enum AdditiveSuffix {
     None,
     Types,
@@ -684,6 +686,39 @@ fn parse_colors_only_in_addition_marker(input: &str) -> OracleResult<'_, &str> {
     Ok((rest, matched))
 }
 
+/// CR 105.3 + CR 707.9d: shared file-local authority for the two-step
+/// carve-out probe every arm below needs — try the shared
+/// [`split_in_addition_tail`] marker (`animation.rs`) first, then fall back
+/// to the file-local [`parse_colors_only_in_addition_tail`] for the
+/// "colors"-only carve-out that marker cannot represent (see the doc comment
+/// on [`AdditiveSuffix`] for why it stays file-local). Returns the type word
+/// list, the remainder immediately after whichever marker matched, and the
+/// carve-out that marker declares. `None` means neither marker matched, so
+/// callers fall back to [`split_at_body_boundary`] with `AdditiveSuffix::None`.
+fn split_carve_out_tail(rest: &str) -> Option<(&str, &str, AdditiveSuffix)> {
+    if let Some((type_text, marker)) = split_in_addition_tail(rest) {
+        // `marker` is the matched marker slice; the clause continues
+        // immediately after it. Recover that position — prefix length, then
+        // skip the separating whitespace — so the remainder is exact.
+        let after_prefix = rest[type_text.len()..].trim_start();
+        let after_marker = &after_prefix[marker.len()..];
+        // CR 105.3: the marker itself carries the color axis when it reads
+        // "in addition to {its|their|his|her} other colors and types". Read
+        // it off the MATCHED MARKER, not off the whole body — a descriptor
+        // whose own words read "colors and" must not flip the axis.
+        let suffix = if nom_primitives::scan_contains(marker, "colors and ") {
+            AdditiveSuffix::ColorsAndTypes
+        } else {
+            AdditiveSuffix::Types
+        };
+        return Some((type_text, after_marker, suffix));
+    }
+    let (type_text, marker) = parse_colors_only_in_addition_tail(rest)?;
+    let after_prefix = rest[type_text.len()..].trim_start();
+    let after_marker = &after_prefix[marker.len()..];
+    Some((type_text, after_marker, AdditiveSuffix::Colors))
+}
+
 /// CR 707.9b: "<subject> N/M {type list} [in addition to {its|his|her} other
 /// [colors and] types]" where the subject is a pronoun-contraction ("he's" /
 /// "she's" / "it's" with either straight or curly apostrophes). Produces
@@ -713,41 +748,25 @@ fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModifi
     let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest).ok()?;
 
     // CR 205.1b: recognise the type list and which carve-out (if any) follows
-    // it through the shared `split_in_addition_tail` marker (`animation.rs`)
+    // it through [`split_carve_out_tail`], the shared file-local authority
+    // that first tries the `split_in_addition_tail` marker (`animation.rs`)
     // — the single authority [`parse_theyre_pt_and_types`] (the plural
-    // sibling) already delegates to — instead of a third bespoke spelling of
+    // sibling) also delegates to — instead of a third bespoke spelling of
     // the "in addition to {its|his|her|their} other [colors and ][creature
-    // ]types" carve-out. The marker composes the possessive-pronoun and CR
-    // 105.3 "colors and " axes already, and additionally recognises the
-    // "creature types" scope this arm never spelled out. When the shared
-    // marker declines, fall back to the file-local [`parse_colors_only_in_addition_tail`]
-    // for the "colors"-only carve-out (Sephiroth, One-Winged Angel: "it's a
-    // 4/4 blue in addition to its other colors.") that marker cannot
-    // represent — see the doc comment on [`AdditiveSuffix`] for why. Only
-    // after BOTH decline does the body fall through to the plain P/T-with-
-    // type-list boundary, which correctly has no carve-out.
-    let (type_text, rest, suffix) = match split_in_addition_tail(rest) {
-        Some((type_text, marker)) => {
-            let after_prefix = rest[type_text.len()..].trim_start();
-            let after_marker = &after_prefix[marker.len()..];
-            let suffix = if nom_primitives::scan_contains(marker, "colors and ") {
-                AdditiveSuffix::ColorsAndTypes
-            } else {
-                AdditiveSuffix::Types
-            };
-            (type_text, after_marker, suffix)
+    // ]types" carve-out, then falls back to the file-local
+    // [`parse_colors_only_in_addition_tail`] for the "colors"-only carve-out
+    // (a synthetic class input: "it's a 4/4 blue in addition to its other
+    // colors."; no printed card is known to pair this carve-out with a P/T
+    // copy-exception body — see the doc comment on [`AdditiveSuffix`] for
+    // why) that the shared marker cannot represent. Only after BOTH decline
+    // does the body fall through to the plain P/T-with-type-list boundary,
+    // which correctly has no carve-out.
+    let (type_text, rest, suffix) = match split_carve_out_tail(rest) {
+        Some((type_text, after_marker, suffix)) => (type_text, after_marker, suffix),
+        None => {
+            let (type_text, rest) = split_at_body_boundary(rest);
+            (type_text, rest, AdditiveSuffix::None)
         }
-        None => match parse_colors_only_in_addition_tail(rest) {
-            Some((type_text, marker)) => {
-                let after_prefix = rest[type_text.len()..].trim_start();
-                let after_marker = &after_prefix[marker.len()..];
-                (type_text, after_marker, AdditiveSuffix::Colors)
-            }
-            None => {
-                let (type_text, rest) = split_at_body_boundary(rest);
-                (type_text, rest, AdditiveSuffix::None)
-            }
-        },
     };
 
     // CR 707.9d: derive the replace-vs-add axes from the carve-out. No carve-out
@@ -890,37 +909,17 @@ fn parse_theyre_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModific
 
     let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest).ok()?;
 
-    let (type_text, rest, suffix) = match split_in_addition_tail(rest) {
-        Some((type_text, marker)) => {
-            // `marker` is the matched marker slice; the clause continues
-            // immediately after it. Recover that position the same way
-            // `split_in_addition_tail` computes it — prefix length, then skip
-            // the separating whitespace — so the remainder is exact.
-            let after_prefix = rest[type_text.len()..].trim_start();
-            let after_marker = &after_prefix[marker.len()..];
-            // CR 105.3: the marker itself carries the color axis when it reads
-            // "in addition to their other colors and types".
-            let suffix = if nom_primitives::scan_contains(marker, "colors and ") {
-                AdditiveSuffix::ColorsAndTypes
-            } else {
-                AdditiveSuffix::Types
-            };
-            (type_text, after_marker, suffix)
+    // CR 105.3: [`split_carve_out_tail`] is the shared file-local authority
+    // for the two-step marker probe — the `split_in_addition_tail` marker
+    // first, then the file-local colors-only carve-out marker (see
+    // [`AdditiveSuffix`] doc comment) — before conceding no carve-out at all.
+    // Same two-step fallback as the singular sibling.
+    let (type_text, rest, suffix) = match split_carve_out_tail(rest) {
+        Some((type_text, after_marker, suffix)) => (type_text, after_marker, suffix),
+        None => {
+            let (type_text, rest) = split_at_body_boundary(rest);
+            (type_text, rest, AdditiveSuffix::None)
         }
-        // CR 105.3: fall back to the file-local colors-only carve-out marker
-        // (see [`AdditiveSuffix`] doc comment) before conceding no carve-out at
-        // all — same two-step fallback as the singular sibling.
-        None => match parse_colors_only_in_addition_tail(rest) {
-            Some((type_text, marker)) => {
-                let after_prefix = rest[type_text.len()..].trim_start();
-                let after_marker = &after_prefix[marker.len()..];
-                (type_text, after_marker, AdditiveSuffix::Colors)
-            }
-            None => {
-                let (type_text, rest) = split_at_body_boundary(rest);
-                (type_text, rest, AdditiveSuffix::None)
-            }
-        },
     };
 
     let (replace_color, replace_types) = match suffix {
@@ -1149,51 +1148,32 @@ fn parse_its_a_type_in_addition(input: &str) -> Option<(&str, Vec<ContinuousModi
     let (rest, _) = alt((tag::<_, _, OracleError<'_>>("an "), tag("a ")))
         .parse(rest)
         .ok()?;
-    // CR 205.1b: `animation::split_in_addition_tail` is the single authority for
-    // the "in addition to {its|their|his|her} other [colors and ][creature
-    // ]types" carve-out marker. `parse_theyre_pt_and_types` already delegates to
-    // it; routing this arm through the same authority is what brings the CR
-    // 105.3 colors axis in (the retired `split_in_addition_type_suffix` already
-    // covered all four possessives), and retires this file's second, narrower
-    // spelling of the same marker.
-    let (type_text, marker) = split_in_addition_tail(rest)?;
-    // Recover the position after the marker exactly the way `split_in_addition_tail`
-    // computes it — prefix length, then skip the separating whitespace — so the
-    // remainder handed back to `parse_except_clause`'s loop is exact. Identical
-    // arithmetic to the plural sibling.
-    let after_prefix = rest[type_text.len()..].trim_start();
-    let after_marker = &after_prefix[marker.len()..];
+    // CR 205.1b: [`split_carve_out_tail`] is the shared file-local authority
+    // for the "in addition to {its|their|his|her} other [colors and ]
+    // [creature ]types" carve-out marker (tried first) and the file-local
+    // colors-only marker (tried as fallback). `parse_theyre_pt_and_types`
+    // already delegates to the same shared helper; routing this arm through
+    // it is what brings the CR 105.3 colors axis in (the retired
+    // `split_in_addition_type_suffix` already covered all four possessives),
+    // and retires this file's second, narrower spelling of the same marker.
+    //
+    // This arm only accepts a types-bearing marker: a colors-only result (no
+    // type list to add types from) or no match at all both decline the whole
+    // arm, exactly as before this helper existed — `split_in_addition_tail`
+    // alone was the only marker this arm ever tried.
+    let (type_text, after_marker, suffix) = split_carve_out_tail(rest)?;
     let type_text = type_text.trim();
     if type_text.is_empty() {
         return None;
     }
-    // CR 105.3: the marker itself carries the color axis when it reads "in
-    // addition to its other colors and types". Read it off the MATCHED MARKER,
-    // not off the whole body — a descriptor whose own words read "colors and"
-    // must not flip the axis. Same call the plural sibling makes.
-    let suffix = if nom_primitives::scan_contains(marker, "colors and ") {
-        AdditiveSuffix::ColorsAndTypes
-    } else {
-        AdditiveSuffix::Types
-    };
-    // CR 707.9d: derive the replace-vs-add axes from the carve-out. The marker's
-    // presence is itself the CR 205.1b type carve-out, so `replace_types` is
-    // never true on this arm; the color axis is the one the marker decides.
-    // `suffix` above is set only from a matched `split_in_addition_tail`
-    // marker (reached via the `?` a few lines up, which returns `None` from
-    // the whole function when no marker is found), and that marker always
-    // carries a trailing "types" tag — so `AdditiveSuffix::None` /
-    // `AdditiveSuffix::Colors` (the file-local colors-only fallback the two
-    // P/T-and-types arms use) can never appear here; this arm has no such
-    // fallback and simply declines instead.
+    // CR 707.9d: derive the replace-vs-add axes from the carve-out. The
+    // marker's presence is itself the CR 205.1b type carve-out, so
+    // `replace_types` is never true on this arm; the color axis is the one
+    // the marker decides.
     let (replace_color, replace_types) = match suffix {
         AdditiveSuffix::Types => (true, false),
         AdditiveSuffix::ColorsAndTypes => (false, false),
-        AdditiveSuffix::None | AdditiveSuffix::Colors => unreachable!(
-            "split_in_addition_tail's marker always carries a trailing \
-             \"types\" tag, so it never yields AdditiveSuffix::None or \
-             AdditiveSuffix::Colors"
-        ),
+        AdditiveSuffix::None | AdditiveSuffix::Colors => return None,
     };
     let mut mods = Vec::new();
     append_color_and_type_modifications(type_text, replace_color, replace_types, &mut mods);
@@ -3137,23 +3117,25 @@ mod tests {
         );
     }
 
-    /// CR 707.9b + CR 105.3 + CR 707.9d: Sephiroth, One-Winged Angel —
-    /// "except it's a 4/4 blue in addition to its other colors." (NO trailing
-    /// "types", so `split_in_addition_tail`'s shared marker declines and this
-    /// exercises the file-local [`parse_colors_only_in_addition_tail`]
-    /// fallback). Color is ADDED (`AddColor`, not `SetColor`) per CR 105.3
-    /// "in addition"; creature subtypes still REPLACE (there are none named
-    /// here, so no `RemoveAllSubtypes`/`AddSubtype` at all — the body names
-    /// only a color word, never a type word). Before this fix, the "in
-    /// addition to its other colors" tail fell to `split_at_body_boundary`
-    /// with `AdditiveSuffix::None` and was fed word-by-word into
-    /// `append_color_and_type_modifications`, fabricating
-    /// `AddSubtype{"In"|"Addition"|"To"|"Its"|"Other"|"Colors"}`.
+    /// CR 707.9b + CR 105.3 + CR 707.9d: synthetic class form — "except it's a
+    /// 4/4 blue in addition to its other colors." (NO trailing "types", so
+    /// `split_in_addition_tail`'s shared marker declines and this exercises
+    /// the file-local [`parse_colors_only_in_addition_tail`] fallback). No
+    /// printed card currently pairs a colors-only carve-out with a P/T
+    /// copy-exception body — Higher Level Zone Monster's colors-only
+    /// exception has no "a N/M" head. Color is ADDED (`AddColor`, not
+    /// `SetColor`) per CR 105.3 "in addition"; creature subtypes still
+    /// REPLACE (there are none named here, so no `RemoveAllSubtypes`/
+    /// `AddSubtype` at all — the body names only a color word, never a type
+    /// word). Before this fix, the "in addition to its other colors" tail
+    /// fell to `split_at_body_boundary` with `AdditiveSuffix::None` and was
+    /// fed word-by-word into `append_color_and_type_modifications`,
+    /// fabricating `AddSubtype{"In"|"Addition"|"To"|"Its"|"Other"|"Colors"}`.
     #[test]
     fn colors_only_suffix_adds_color_with_no_fabricated_subtypes() {
         let mods = mods_of(
             ", except it's a 4/4 blue in addition to its other colors.",
-            "Sephiroth, One-Winged Angel",
+            "Card",
         );
         assert_eq!(
             mods,
@@ -3172,6 +3154,36 @@ mod tests {
                 ContinuousModification::AddSubtype { subtype } if garbage.contains(&subtype.as_str())
             )),
             "colors-only suffix leaked a marker word as AddSubtype; got {mods:?}"
+        );
+    }
+
+    /// Plural sibling of `colors_only_suffix_adds_color_with_no_fabricated_subtypes`:
+    /// exercises `parse_theyre_pt_and_types`'s colors-only fallback (no
+    /// trailing "types", so `split_in_addition_tail`'s shared marker declines
+    /// and the file-local [`parse_colors_only_in_addition_tail`] combinator
+    /// claims the tail instead). Synthetic class form pinning the grammar
+    /// axis in parity with the singular arm.
+    #[test]
+    fn theyre_colors_only_suffix_adds_color_with_no_fabricated_subtypes() {
+        let mods = mods_of(
+            ", except they're 1/1 blue in addition to their other colors.",
+            "Card",
+        );
+        assert_eq!(
+            mods,
+            vec![
+                ContinuousModification::SetPower { value: 1 },
+                ContinuousModification::SetToughness { value: 1 },
+                ContinuousModification::AddColor {
+                    color: ManaColor::Blue
+                },
+            ]
+        );
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::AddSubtype { .. })),
+            "colors-only suffix must not fabricate an AddSubtype; got {mods:?}"
         );
     }
 
