@@ -69,8 +69,11 @@ const DEFAULT_GUILD_ID = "1485498006781427802";
 
 /** Discord application credentials (the dedicated card-bot app, not the bug bot). */
 export const discord = {
-  /** Bot token (secret) — only needed to register slash commands (register.ts). */
+  /** Bot token (secret). register.ts requires it; the server uses it for /lfg
+   *  game threads when set (see `tokenIfSet`). */
   token: () => required("CARD_BOT_TOKEN"),
+  /** The bot token, or undefined when unset (the server then runs without game threads). */
+  tokenIfSet: () => Bun.env.CARD_BOT_TOKEN || undefined,
   /** Ed25519 public key — verifies inbound interaction signatures. */
   publicKey: () => Bun.env.CARD_BOT_PUBLIC_KEY || DEFAULT_PUBLIC_KEY,
   /** Application (client) id. */
@@ -106,8 +109,8 @@ export const BUILD_ENDPOINTS: Record<Build, { site: string; lobbyWs: string; lob
   },
 };
 
-/** Default /lfg build: players play on the stable site (DEFAULT_BUILD stays preview for /card). */
-export const LFG_DEFAULT_BUILD: Build = "release";
+/** Default /lfg build. Separate from DEFAULT_BUILD (/card) so the two can differ. */
+export const LFG_DEFAULT_BUILD: Build = "preview";
 
 /** SQLite file for LFG state (a Docker volume in production). */
 export const LFG_DB_PATH = Bun.env.CARD_BOT_DB_PATH ?? "/data/lfg.sqlite";
