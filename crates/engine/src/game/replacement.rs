@@ -21,8 +21,9 @@ use super::filter::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    DrainStatus, GameState, PendingReplacement, PostReplacementDrain, ReplacementCandidateSummary,
-    ReplacementChoiceKind, ReplacementIndexEntry, ResidentDrainPolicy, WaitingFor,
+    DrainStatus, GameState, LiminalEntry, LiminalEntryKind, PendingReplacement,
+    PostReplacementDrain, ReplacementCandidateSummary, ReplacementChoiceKind,
+    ReplacementIndexEntry, ResidentDrainPolicy, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::mana::{StepEndManaAction, UnitDisposition};
@@ -1582,10 +1583,10 @@ fn replacement_choice_label(repl: &ReplacementDefinition) -> String {
 /// object's own `replacement_definitions`. `rid.index` indexes whichever store
 /// `rid.source` selected — that pairing is NOT changed here or anywhere else.
 ///
-/// `replacement_definition_for_id` (the rules-side authority, which also runs the
-/// CR 121.2 draw-scope `debug_assert!`) deliberately keeps its object-only lookup;
-/// this is a separate, narrower question asked only while building a
-/// `WaitingFor::ReplacementChoice` payload.
+/// `replacement_definition_for_id` is the rules-side authority (liminal
+/// projection first, then the object, plus the CR 121.2 draw-scope
+/// `debug_assert!`). The non-sentinel branch delegates to it, so a CR 616.1
+/// prompt describes the same definition the pipeline applies (CR 614.12).
 fn replacement_choice_definition(
     state: &GameState,
     rid: ReplacementId,
@@ -1593,10 +1594,7 @@ fn replacement_choice_definition(
     if rid.source == ObjectId(0) {
         state.pending_damage_replacements.get(rid.index)
     } else {
-        state
-            .objects
-            .get(&rid.source)
-            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        replacement_definition_for_id(state, rid)
     }
 }
 
@@ -7369,41 +7367,6 @@ fn object_replacement_candidate_applies(
     {
         return false;
     }
-    // CR 712.14a + CR 714.3a: A Saga exiled by its final chapter and returned
-    // transformed enters showing its creature back face. Its front-face
-    // intrinsic lore replacement must not apply to that entry; otherwise NEO
-    // transforming Sagas such as Fable and Kumano return with a stray lore
-    // counter. A transformed back face that actually is a Saga still receives
-    // its intrinsic lore counter through the entry pipeline.
-    if is_entering
-        && matches!(
-            event,
-            ProposedEvent::ZoneChange {
-                enter_transformed: true,
-                ..
-            }
-        )
-        && obj.back_face.as_ref().is_some_and(|back| {
-            !back
-                .card_types
-                .subtypes
-                .iter()
-                .any(|subtype| subtype == "Saga")
-        })
-        && repl_def.event == ReplacementEvent::Moved
-        && repl_def.destination_zone == Some(Zone::Battlefield)
-        && matches!(repl_def.valid_card, Some(TargetFilter::SelfRef))
-        && matches!(
-            repl_def.execute.as_ref().map(|execute| &*execute.effect),
-            Some(Effect::PutCounter {
-                counter_type: CounterType::Lore,
-                target: TargetFilter::SelfRef,
-                ..
-            })
-        )
-    {
-        return false;
-    }
     // CR 614.12: off-battlefield entering/discarded objects only apply their
     // own self-replacement effects.
     if is_entering
@@ -7841,6 +7804,150 @@ fn liminal_entry_ref(event: &ProposedEvent) -> Option<ObjectId> {
     }
 }
 
+/// CR 614.12 + CR 712.8c + CR 712.11a + CR 712.13 + CR 712.14a: the object whose battlefield
+/// entry puts it back face up while it is still front face up now.
+fn transformed_entry_entrant(state: &GameState, event: &ProposedEvent) -> Option<ObjectId> {
+    let ProposedEvent::ZoneChange {
+        object_id,
+        to: Zone::Battlefield,
+        enter_transformed: true,
+        face_down_profile: None,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    let obj = state.objects.get(object_id)?;
+    if obj.back_face.is_none() || obj.transformed {
+        return None;
+    }
+    match state
+        .liminal_entries
+        .get(object_id)
+        .map(|entry| &entry.kind)
+    {
+        None => Some(*object_id),
+        Some(LiminalEntryKind::TransformedEntry) => Some(*object_id),
+        Some(_) => None,
+    }
+}
+
+/// CR 614.12: the object whose stored entrant scan is superseded by a resident
+/// `TransformedEntry` (or meld/token) projection for the same source — the
+/// projection is that entrant's authority for its own definitions, so offering
+/// the stored object's indices as well would evaluate them against the
+/// projection a second time.
+fn stored_entrant_superseded_by_projection(
+    state: &GameState,
+    event: &ProposedEvent,
+    source: ObjectId,
+) -> bool {
+    liminal_entry_ref(event) == Some(source) && state.liminal_entries.contains_key(&source)
+}
+
+/// CR 614.12 + CR 712.8c + CR 712.11a + CR 712.13 + CR 712.14a: stage the
+/// back-face projection for a transformed battlefield entry so the
+/// replacement pipeline consults the face the permanent will have on the
+/// battlefield, not the face it is leaving. Returns `Some(entrant)` whenever
+/// `event` is a transformed entry, whether or not a projection was freshly
+/// built (a resident `TransformedEntry` projection reaching this function can
+/// only be left over from an abandoned pause, and is unconditionally
+/// overwritten — a live pause resumes through `continue_replacement`, which
+/// reuses a resident projection without calling this function).
+fn stage_transformed_entry_projection(
+    state: &mut GameState,
+    event: &ProposedEvent,
+) -> Option<ObjectId> {
+    // Stale-guard: an untransformed battlefield entry of X must not reuse a
+    // `TransformedEntry` projection left resident by a replacement pause that
+    // was abandoned elsewhere (e.g. a player leaving the game mid-pause) —
+    // this seam is the entrant's next battlefield-entry proposal, so it is
+    // where any such stale projection would otherwise linger.
+    if let ProposedEvent::ZoneChange {
+        object_id,
+        to: Zone::Battlefield,
+        enter_transformed: false,
+        ..
+    } = event
+    {
+        if matches!(
+            state
+                .liminal_entries
+                .get(object_id)
+                .map(|entry| &entry.kind),
+            Some(LiminalEntryKind::TransformedEntry)
+        ) {
+            state.liminal_entries.remove(object_id);
+        }
+    }
+
+    let entrant = transformed_entry_entrant(state, event)?;
+    let (controller_override, enters_attacking) = match event {
+        ProposedEvent::ZoneChange {
+            controller_override,
+            enters_attacking,
+            ..
+        } => (*controller_override, *enters_attacking),
+        _ => unreachable!("transformed_entry_entrant only returns Some for a ZoneChange"),
+    };
+
+    let mut projected = state.objects.get(&entrant)?.clone();
+    // CR 400.7 + CR 712.8a (#7565): the single symmetric face-swap authority,
+    // which also preserves the stored slot's `layout_kind` — the same call
+    // `stack.rs`, `zones.rs` and `casting.rs` make on live objects.
+    crate::game::printed_cards::swap_object_faces(&mut projected);
+    projected.transformed = true;
+    if let Some(controller) = controller_override {
+        projected.controller = controller;
+    }
+    let name = projected.name.clone();
+    let controller = projected.controller;
+
+    state.liminal_entries.insert(
+        entrant,
+        LiminalEntry {
+            object: crate::types::game_state::LiminalEntrant::Card(projected),
+            name,
+            source_id: entrant,
+            controller,
+            enters_attacking,
+            attach_to: None,
+            sacrifice_at: None,
+            remaining_count: 0,
+            created_ids: Vec::new(),
+            copy_resume: None,
+            spec_resume: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            enter_with_counters: Vec::new(),
+            kind: LiminalEntryKind::TransformedEntry,
+            replacement_applied: HashSet::new(),
+        },
+    );
+    Some(entrant)
+}
+
+/// CR 614.12: release a staged `TransformedEntry` projection once the
+/// replacement pipeline has settled the event. `NeedsChoice` keeps it — the
+/// pause owns it until it resumes through `continue_replacement`.
+fn release_transformed_entry_projection(
+    state: &mut GameState,
+    staged: Option<ObjectId>,
+    result: &ReplacementResult,
+) {
+    let Some(entrant) = staged else {
+        return;
+    };
+    if matches!(result, ReplacementResult::NeedsChoice(_)) {
+        return;
+    }
+    if matches!(
+        state.liminal_entries.get(&entrant).map(|entry| &entry.kind),
+        Some(LiminalEntryKind::TransformedEntry)
+    ) {
+        state.liminal_entries.remove(&entrant);
+    }
+}
+
 fn legacy_object_replacement_candidates(
     state: &GameState,
     event: &ProposedEvent,
@@ -7848,6 +7955,12 @@ fn legacy_object_replacement_candidates(
 ) -> Vec<ReplacementId> {
     let mut candidates: Vec<_> = super::functioning_abilities::active_replacements(state)
         .filter_map(|(index, obj, _)| {
+            // CR 614.12: the projection below is the entrant's authority for
+            // its own definitions; offering the stored object's indices as
+            // well would evaluate them against the projection a second time.
+            if stored_entrant_superseded_by_projection(state, event, obj.id) {
+                return None;
+            }
             let rid = ReplacementId {
                 source: obj.id,
                 index,
@@ -7900,6 +8013,12 @@ fn indexed_object_replacement_candidates_from_index(
     let mut candidates: Vec<ReplacementId> = entries
         .into_iter()
         .filter_map(|entry| {
+            // CR 614.12: the projection below is the entrant's authority for
+            // its own definitions; offering the stored object's indices as
+            // well would evaluate them against the projection a second time.
+            if stored_entrant_superseded_by_projection(state, event, entry.id.source) {
+                return None;
+            }
             object_replacement_candidate_applies(state, event, registry, entry.id)
                 .then_some(entry.id)
         })
@@ -10446,10 +10565,10 @@ fn candidate_materiality(
         return CandidateMateriality::Unconditional;
     }
 
-    let repl_def = state
-        .objects
-        .get(&rid.source)
-        .and_then(|obj| obj.replacement_definitions.get(rid.index));
+    // CR 614.12: honour any liminal projection (a transformed entry's back
+    // face, or a meld result) so ordering-material classification reads the
+    // definition the pipeline will actually apply, not a stale stored one.
+    let repl_def = replacement_definition_for_id(state, rid);
     let Some(repl_def) = repl_def else {
         // Unknown definition — be conservative.
         return CandidateMateriality::Unconditional;
@@ -11004,9 +11123,15 @@ pub fn replace_event(
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
     let registry = replacement_registry();
+    // CR 614.12: stage the back-face projection of a transformed battlefield
+    // entry before the pipeline runs, and release it once the pipeline
+    // settles — a pause (`NeedsChoice`) keeps it resident for
+    // `continue_replacement` to resume.
+    let staged = stage_transformed_entry_projection(state, &proposed);
     prepare_replacement_index_for_pipeline(state);
     let result = pipeline_loop(state, proposed, 0, registry, events);
     clear_replacement_index_pipeline(state);
+    release_transformed_entry_projection(state, staged, &result);
     result
 }
 
@@ -11640,8 +11765,31 @@ pub fn continue_replacement(
     chosen_index: usize,
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
+    // CR 614.12: a resumed pause reuses its own resident `TransformedEntry`
+    // projection (staged when the pause first parked, still needed by the
+    // resume's label/choice reads) rather than rebuilding it. Any other
+    // pending event re-runs the ordinary stage/stale-guard path — this is
+    // also how a projection released during a MayCost `PausedForChoice` pause
+    // (`continue_replacement_impl`'s re-park through `pending_replacement`)
+    // gets restaged.
+    let pending_event = state
+        .pending_replacement
+        .as_ref()
+        .map(|pending| pending.proposed.clone());
+    let staged = pending_event.as_ref().and_then(|proposed| {
+        if let Some(entrant) = transformed_entry_entrant(state, proposed) {
+            if matches!(
+                state.liminal_entries.get(&entrant).map(|entry| &entry.kind),
+                Some(LiminalEntryKind::TransformedEntry)
+            ) {
+                return Some(entrant);
+            }
+        }
+        stage_transformed_entry_projection(state, proposed)
+    });
     let result = continue_replacement_impl(state, chosen_index, events);
     clear_replacement_index_pipeline(state);
+    release_transformed_entry_projection(state, staged, &result);
     result
 }
 

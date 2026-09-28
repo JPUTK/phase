@@ -1,12 +1,18 @@
 #![allow(unused_imports)]
 use super::*;
 
+use crate::support::shared_card_db;
+
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, ControllerRef, Effect, EffectScope, FilterProp,
-    ReplacementCondition, ReplacementDefinition, TapStateChange, TargetFilter, TypedFilter,
+    ReplacementCondition, ReplacementDefinition, ResolvedAbility, TapStateChange, TargetFilter,
+    TargetRef, TypedFilter,
 };
 use engine::types::card_type::CoreType;
+use engine::types::counter::CounterType;
 use engine::types::identifiers::CardId;
+use engine::types::proposed_event::EtbTapState;
 use engine::types::replacements::ReplacementEvent;
 
 /// Build a fast land replacement definition matching
@@ -589,5 +595,146 @@ fn turbulent_land_own_lands_do_not_count() {
     assert!(
         obj.tapped,
         "Turbulent Fen must not count controller's lands against the opponent threshold"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CR 614.12 + CR 712.14a: a transformed battlefield entry consults the back
+// face's own replacement definitions, not the stored front face's. Effect
+// route (`ChangeZone { enter_transformed: true }`) — real cards from the
+// committed integration fixture.
+// ---------------------------------------------------------------------------
+
+fn add_red_mana(runner: &mut GameRunner, count: u32) {
+    let dummy = engine::types::identifiers::ObjectId(0);
+    let pool = &mut runner.state_mut().players[0].mana_pool;
+    for _ in 0..count {
+        pool.add(engine::types::mana::ManaUnit::new(
+            engine::types::mana::ManaType::Red,
+            dummy,
+            false,
+            vec![],
+        ));
+    }
+}
+
+fn resolve_transformed_entry(runner: &mut GameRunner, object_id: ObjectId) {
+    let resolved = ResolvedAbility::new(
+        Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Battlefield,
+            target: TargetFilter::SelfRef,
+            owner_library: false,
+            enter_transformed: true,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+        vec![TargetRef::Object(object_id)],
+        object_id,
+        P0,
+    );
+    let mut events = Vec::new();
+    engine::game::effects::resolve_ability_chain(runner.state_mut(), &resolved, &mut events, 0)
+        .expect("transformed battlefield entry resolves");
+}
+
+/// (CR 614.12 + CR 712.14a): a back face's own mandatory as-enters counter
+/// replacement applies on the effect route — Ral, Monsoon Mage returned
+/// transformed enters with its back face's loyalty bonus on top of printed
+/// loyalty, not the front face's (nonexistent) replacement.
+#[test]
+fn ral_returned_transformed_applies_back_face_loyalty_replacement() {
+    let db = shared_card_db().expect("integration fixture must be present");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ral = scenario.add_real_card(P0, "Ral, Monsoon Mage", Zone::Exile, db);
+    let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Hand, db);
+    let mut runner = scenario.build();
+    add_red_mana(&mut runner, 1);
+
+    runner.cast(bolt).target_player(P1).resolve();
+
+    // Reach guards: one instant was cast this turn, and the back face carries
+    // exactly one `Moved` replacement (the loyalty bonus) while the front
+    // face carries none.
+    assert_eq!(
+        runner
+            .state()
+            .spells_cast_this_turn_by_player
+            .get(&P0)
+            .map(|v| v.len())
+            .unwrap_or(0),
+        1
+    );
+    {
+        let obj = &runner.state().objects[&ral];
+        assert_eq!(obj.replacement_definitions.len(), 0);
+        let back = obj.back_face.as_ref().expect("Ral must have a back face");
+        assert_eq!(
+            back.replacement_definitions
+                .iter_unchecked()
+                .filter(|def| def.event == ReplacementEvent::Moved)
+                .count(),
+            1
+        );
+    }
+
+    resolve_transformed_entry(&mut runner, ral);
+
+    let obj = &runner.state().objects[&ral];
+    assert_eq!(obj.name, "Ral, Leyline Prodigy");
+    assert!(obj.transformed);
+    assert_eq!(
+        obj.counters.get(&CounterType::Loyalty).copied(),
+        Some(3),
+        "CR 614.12 + CR 712.14a: printed loyalty 2 plus the back face's own \
+         replacement (+1 for the instant cast this turn)"
+    );
+}
+
+/// (CR 614.12 + CR 714.3a): a back-face Saga entering transformed gets
+/// exactly one lore counter, from its own replacement — dropping the CR 614.12
+/// transformed-entry projection would drop it to 0 (the front-face
+/// suppression special case is gone) and reverting the lore-seeding removal
+/// alone would double it to 2 (intrinsic seeding still running).
+#[test]
+fn sheoldred_returns_true_scriptures_with_one_lore_counter() {
+    let db = shared_card_db().expect("integration fixture must be present");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let sheoldred = scenario.add_real_card(P0, "Sheoldred", Zone::Exile, db);
+    let mut runner = scenario.build();
+
+    {
+        let obj = &runner.state().objects[&sheoldred];
+        let back = obj
+            .back_face
+            .as_ref()
+            .expect("Sheoldred must have a back face");
+        assert_eq!(back.name, "The True Scriptures");
+        assert!(back.card_types.subtypes.iter().any(|s| s == "Saga"));
+        assert!(back
+            .replacement_definitions
+            .iter_unchecked()
+            .any(|def| def.event == ReplacementEvent::Moved));
+    }
+
+    resolve_transformed_entry(&mut runner, sheoldred);
+
+    let obj = &runner.state().objects[&sheoldred];
+    assert!(obj.transformed);
+    assert_eq!(obj.name, "The True Scriptures");
+    assert!(obj.card_types.subtypes.iter().any(|s| s == "Saga"));
+    assert_eq!(
+        obj.counters.get(&CounterType::Lore).copied(),
+        Some(1),
+        "CR 714.3a + CR 614.12: exactly one lore counter, from the back \
+         face's own replacement"
     );
 }
