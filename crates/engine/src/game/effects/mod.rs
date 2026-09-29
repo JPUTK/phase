@@ -694,9 +694,9 @@ pub(crate) fn player_control_count_compares(
 /// CR 402.1 / 119.1 / 119.3 / 122.1f / 404.1: Read scalar `attr` for one
 /// candidate player DIRECTLY off the candidate `Player` (NOT via the
 /// controller-scoped `resolve_quantity`), so `PlayerFilter::PlayerAttribute`
-/// reads each player's own hand size / life total / life lost / graveyard /
-/// player-counter rather than the controller's. Returns `None` for any
-/// non-scalar `QuantityRef`; the parser
+/// reads each player's own hand size / life total / life lost or gained /
+/// graveyard / player-counter rather than the controller's. Returns `None` for
+/// any non-scalar `QuantityRef`; the parser
 /// invariant guarantees only the scalar subset reaches here, and `None` fails
 /// the candidate predicate closed.
 pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<i32> {
@@ -706,6 +706,12 @@ pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<
         QuantityRef::HandSize { .. } => Some(usize_to_i32_saturating(p.hand.len())),
         // CR 119.3: life lost this turn is tracked per candidate player.
         QuantityRef::LifeLostThisTurn { .. } => Some(u32_to_i32_saturating(p.life_lost_this_turn)),
+        // CR 119.3: life gained this turn is tracked per candidate player — the
+        // gained-direction sibling of the arm above, read by the all-players
+        // "for each player who gained life this turn" population.
+        QuantityRef::LifeGainedThisTurn { .. } => {
+            Some(u32_to_i32_saturating(p.life_gained_this_turn))
+        }
         // CR 404.1: cards in the candidate's graveyard.
         QuantityRef::GraveyardSize { .. } => Some(usize_to_i32_saturating(p.graveyard.len())),
         // CR 122.1f (poison) + CR 122.1: the candidate's named player-counter total.
@@ -802,6 +808,308 @@ pub(super) fn restore_continuation_trigger_firing(
         (Some(_), _) => {}
         (None, Some(stashed)) => state.resolving_trigger_firing = Some(stashed),
         (None, None) => {}
+    }
+}
+
+pub(crate) fn settle_forwarded_zone_result(
+    state: &mut GameState,
+    group: &crate::types::game_state::LogicalZoneChangeGroup,
+) {
+    let Some(marker) = state
+        .active_ability_continuation()
+        .and_then(|pending| pending.chain.context.pending_forwarded_zone_result.clone())
+    else {
+        return;
+    };
+    if marker.group != Some(group.logical_group_id) {
+        return;
+    }
+    let result = forwarded_zone_result_from_events(
+        state,
+        marker.selected.as_deref(),
+        group
+            .all_origin_occurrences
+            .iter()
+            .map(|occurrence| &occurrence.event),
+    );
+    bind_completed_forwarded_zone_result(state, result);
+}
+
+fn forwards_battlefield_move(ability: &ResolvedAbility) -> bool {
+    ability.forward_result
+        && matches!(
+            ability.effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        )
+}
+
+/// CR 400.7j: a grouped move settles from every arrival in its logical group;
+/// an ungrouped one from the single member its replacement choice paused.
+fn pending_forwarded_zone_result(
+    state: &GameState,
+    producer: ObjectId,
+) -> crate::types::ability::PendingForwardedZoneResult {
+    let group = state
+        .active_change_zone_frame()
+        .and_then(|frame| frame.pending.as_ref())
+        .map(|pending| pending.logical_zone_change_group.logical_group_id);
+    let selected = group
+        .is_none()
+        .then(|| state.pending_zone_change_delivery_from_replacement())
+        .flatten()
+        .map(|delivery| vec![delivery.member]);
+    crate::types::ability::PendingForwardedZoneResult {
+        producer,
+        selected,
+        group,
+    }
+}
+
+fn forwarded_zone_result_from_events<'a>(
+    state: &GameState,
+    selected: Option<&[crate::types::identifiers::ObjectIncarnationRef]>,
+    events: impl Iterator<Item = &'a GameEvent>,
+) -> ForwardedResultContext {
+    let arrivals: Vec<_> = events
+        .filter_map(|event| {
+            let GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Battlefield,
+                record,
+                ..
+            } = event
+            else {
+                return None;
+            };
+            if let Some(selected) = selected {
+                let source = record.trigger_source_context()?.identity.reference;
+                if !selected.contains(&source) {
+                    return None;
+                }
+            }
+            let entered = crate::types::identifiers::ObjectIncarnationRef::of(
+                *object_id,
+                record.entered_incarnation?,
+            );
+            (entered.is_current(state) && state.objects[object_id].zone == Zone::Battlefield)
+                .then_some(entered)
+        })
+        .collect();
+    ForwardedResultContext {
+        targets: arrivals
+            .iter()
+            .map(|pin| TargetRef::Object(pin.object_id))
+            .collect(),
+        object_incarnations: arrivals,
+    }
+}
+
+/// CR 400.7j: point a `forward_result` child at the objects its producer moved,
+/// keeping the producer's pre-move identity where the child names it. Returns
+/// the Attach attachment candidates drawn from the moved set.
+fn rebind_child_to_forwarded_objects(
+    state: &GameState,
+    child: &mut ResolvedAbility,
+    producer: ObjectId,
+    producer_targets: &[TargetRef],
+    moved: &[ObjectId],
+) -> Vec<crate::types::identifiers::ObjectIncarnationRef> {
+    if moved.is_empty() {
+        return Vec::new();
+    }
+    let attachment_candidates = attach::attachment_candidates_from_zone_change(state, child, moved);
+    // CR 707.10: `CopySpell { SelfRef }` copies the resolving spell
+    // itself (Sevinne's Reclamation, Chain cycle). `forward_result`
+    // rebinding `source_id` to the just-moved permanent would make
+    // `copy_spell::resolve` look up the wrong stack entry after
+    // `resolve_top` has popped the spell (issue #2860).
+    if copy_spell_self_ref_keeps_resolving_spell_source(child) {
+        return attachment_candidates;
+    }
+    // CR 603.7c + CR 201.5: `CreateDelayedTrigger` keeps the creating
+    // ability's source. Its ParentTarget anaphora read the separate
+    // forwarded-result context at delayed-trigger creation.
+    if !matches!(child.effect, Effect::CreateDelayedTrigger { .. }) {
+        child.source_id = moved[0];
+    }
+    if let Effect::Attach { target, .. } = &child.effect {
+        let attach_target_is_last_created = matches!(target, TargetFilter::LastCreated);
+        // CR 608.2c: ParentTarget hosts inherit an explicit parent
+        // choice when present (Necrotic Plague). When none was chosen,
+        // fall back to the ability source as host — CR 301.5b +
+        // CR 701.3a put→attach-to-~ (Iron Man, Armored Skyhunter).
+        // Do not append the source on top of an already-bound host:
+        // that would let ParentTarget resolve to the returned Aura.
+        let attach_target_is_parent = matches!(target, TargetFilter::ParentTarget);
+        if attach_target_is_parent {
+            if child.targets.is_empty() {
+                if !producer_targets.is_empty() {
+                    child.targets = producer_targets.to_vec();
+                } else {
+                    child.targets.push(TargetRef::Object(producer));
+                }
+            }
+        } else if !attach_target_is_last_created
+            && !child
+                .targets
+                .iter()
+                .any(|t| matches!(t, TargetRef::Object(id) if *id == producer))
+        {
+            child.targets.push(TargetRef::Object(producer));
+        }
+    }
+    // CR 608.2c: OriginalSource names the ability's TRUE pre-rebind source — the
+    // reanimator-Aura's own identity — surviving the forward_result rebind above
+    // that would otherwise point source_id at the just-reanimated creature
+    // instead of the Aura whose own keyword text this static is rewriting
+    // (Animate Dead / Dance of the Dead class: "it loses ... and gains ...").
+    // Concretized here, eagerly, in-place — never persisted as a ResolvedAbility
+    // field — because this is where the pre-rebind producer identity and the
+    // rebound child coexist.
+    if let Effect::GenericEffect {
+        static_abilities, ..
+    } = &mut child.effect
+    {
+        for sd in static_abilities.iter_mut() {
+            if sd.affected == Some(TargetFilter::OriginalSource) {
+                sd.affected = Some(TargetFilter::SpecificObject { id: producer });
+            }
+        }
+    }
+    attachment_candidates
+}
+
+fn bind_forwarded_zone_result(
+    child: &mut ResolvedAbility,
+    result: ForwardedResultContext,
+    attachment_candidates: Vec<crate::types::identifiers::ObjectIncarnationRef>,
+) {
+    child.context.pending_forwarded_zone_result = None;
+    child.context.forwarded_result_context = Some(Box::new(result));
+    bind_forwarded_result_targets_for_legacy_effect(child);
+    if !attachment_candidates.is_empty() {
+        child.bind_attach_attachment_candidates(attachment_candidates);
+    }
+}
+
+fn bind_moved_objects_to_child(
+    state: &GameState,
+    child: &mut ResolvedAbility,
+    producer: ObjectId,
+    producer_targets: &[TargetRef],
+    result: ForwardedResultContext,
+) {
+    let moved: Vec<ObjectId> = result
+        .object_incarnations
+        .iter()
+        .map(|pin| pin.object_id)
+        .collect();
+    let attachment_candidates =
+        rebind_child_to_forwarded_objects(state, child, producer, producer_targets, &moved);
+    bind_forwarded_zone_result(child, result, attachment_candidates);
+}
+
+fn bind_active_continuation_to_moved_objects(
+    state: &mut GameState,
+    producer: ObjectId,
+    producer_targets: &[TargetRef],
+    result: ForwardedResultContext,
+) {
+    let Some(pending) = state.active_ability_continuation() else {
+        return;
+    };
+    let mut child = pending.chain.clone();
+    bind_moved_objects_to_child(state, &mut child, producer, producer_targets, result);
+    if let Some(frame) = state.active_ability_continuation_frame_mut() {
+        frame.pending.chain = child;
+    }
+}
+
+fn bind_completed_forwarded_zone_result(state: &mut GameState, result: ForwardedResultContext) {
+    let Some(producer) = state
+        .active_ability_continuation()
+        .and_then(|pending| pending.chain.context.pending_forwarded_zone_result.as_ref())
+        .map(|marker| marker.producer)
+    else {
+        return;
+    };
+    bind_active_continuation_to_moved_objects(state, producer, &[], result);
+}
+
+/// CR 400.7j: an accepted optional move binds its stashed rider from its own event slice.
+fn park_forwarded_zone_result_on_active_continuation(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    producer_events: &[GameEvent],
+) {
+    if !forwards_battlefield_move(ability)
+        || !state.active_ability_continuation().is_some_and(|pending| {
+            pending.chain.source_id == ability.source_id
+                && pending
+                    .chain
+                    .context
+                    .pending_forwarded_zone_result
+                    .is_none()
+        })
+    {
+        return;
+    }
+    let marker = pending_forwarded_zone_result(state, ability.source_id);
+    let result = forwarded_zone_result_from_events(state, None, producer_events.iter());
+    if marker.group.is_some()
+        || (result.object_incarnations.is_empty()
+            && waits_for_resolution_choice(&state.waiting_for))
+    {
+        if let Some(frame) = state.active_ability_continuation_frame_mut() {
+            frame.pending.chain.context.pending_forwarded_zone_result = Some(marker);
+        }
+    } else {
+        bind_active_continuation_to_moved_objects(
+            state,
+            ability.source_id,
+            &ability.targets,
+            result,
+        );
+    }
+}
+
+/// CR 614.6: a replaced move settles its rider from its own terminal delivery slice.
+pub(crate) fn settle_replaced_forwarded_zone_delivery(
+    state: &mut GameState,
+    member: crate::types::identifiers::ObjectIncarnationRef,
+    delivery_events: &[GameEvent],
+) {
+    let owns_delivery = state
+        .active_ability_continuation()
+        .and_then(|pending| pending.chain.context.pending_forwarded_zone_result.as_ref())
+        .is_some_and(|marker| {
+            marker.group.is_none() && marker.selected.as_deref() == Some(&[member][..])
+        });
+    if owns_delivery {
+        let result =
+            forwarded_zone_result_from_events(state, Some(&[member]), delivery_events.iter());
+        bind_completed_forwarded_zone_result(state, result);
+    }
+}
+
+pub(crate) fn settle_empty_forwarded_zone_result(state: &mut GameState, producer: ObjectId) {
+    if let Some(frame) = state.active_ability_continuation_frame_mut() {
+        let child = &mut frame.pending.chain;
+        if child
+            .context
+            .pending_forwarded_zone_result
+            .as_ref()
+            .is_some_and(|marker| marker.producer == producer)
+        {
+            child.context.pending_forwarded_zone_result = None;
+            child.context.forwarded_result_context = Some(Box::new(ForwardedResultContext {
+                targets: Vec::new(),
+                object_incarnations: Vec::new(),
+            }));
+        }
     }
 }
 
@@ -918,8 +1226,24 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         let trigger_snapshot = trigger_context
             .as_ref()
             .map(|ctx| super::triggers::push_resolving_trigger_context(state, ctx));
+        let mut chain = chain;
+        // An unsettled moved-object referent must never fall back to the original source.
+        if chain.context.pending_forwarded_zone_result.take().is_some() {
+            chain.context.forwarded_result_context = Some(Box::new(ForwardedResultContext {
+                targets: Vec::new(),
+                object_incarnations: Vec::new(),
+            }));
+        }
         if !player_scope_queue_end {
-            let _ = resolve_ability_chain(state, &chain, events, 1);
+            if bound_result_is_empty(&chain)
+                && ability_chain_depends_on_missing_forward_result(&chain)
+            {
+                if let Some(remaining) = without_missing_forward_result_dependencies(&chain) {
+                    let _ = resolve_ability_chain(state, &remaining, events, 1);
+                }
+            } else {
+                let _ = resolve_ability_chain(state, &chain, events, 1);
+            }
         }
         if let Some(scope) = state.resolving_player_scope_linked_exile.as_ref() {
             mark_exile_choice_tracks_by_source(state, scope.source_id);
@@ -1892,6 +2216,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
         let _ = state
             .take_active_change_zone_frame()
             .expect("settled ChangeZone must consume the active owner once");
+        settle_forwarded_zone_result(state, &logical_zone_change_group);
         if let Some(count) = moved_count {
             state.last_effect_count = Some(count);
             if let Some(cause) = this_way_cause_for_zone(destination) {
@@ -3855,6 +4180,7 @@ pub(super) fn resolve_optional_effect_decision(
             state
                 .player_actions_this_way
                 .insert((ability.controller, PlayerActionKind::AcceptedOptionalEffect));
+            let producer_events_start = events.len();
             resolve_ability_chain(state, &ability, events, depth)?;
             // CR 608.2c: When an optional effect's prompt suspended the parent
             // chain, the "If you do" sibling continuation was stashed BEFORE the
@@ -3869,6 +4195,11 @@ pub(super) fn resolve_optional_effect_decision(
                     .chain
                     .set_optional_effect_performed_recursive(true);
             }
+            park_forwarded_zone_result_on_active_continuation(
+                state,
+                &ability,
+                &events[producer_events_start..],
+            );
         }
         AutoMayChoice::Decline => {
             if let Some(branch) = optional_decline_branch(&ability) {
@@ -15212,17 +15543,6 @@ fn resolve_chain_body(
             // fixed `Mana { cost }` BEFORE entering the prompt — the runtime
             // payment site only handles static AbilityCost variants.
             let resolved_cost = resolved_unless_cost(state, ability, &unless_pay.cost);
-            // CR 118.5 + CR 118.12a: Zero-mana unless cost short-circuit.
-            // Pre-fold (2026-05-09 audit) the counter and tax/trigger paths
-            // had divergent behavior here:
-            //   - The counter-specific resolver treated `{0}` as "the
-            //     spell-controller paid; the spell survives" (per CR 118.5,
-            //     "players can always pay 0"). This matches the player's
-            //     real-world choice to always pay 0.
-            //   - The generic tax-trigger path fell through and executed the
-            //     effect anyway (no opt-out offered).
-            // The fold preserves both behaviors verbatim to keep this batch
-            // strictly architectural; harmonizing them is tracked separately.
             // CR 118.6 + CR 202.1b: A cost based on the mana cost of an object
             // that has no mana cost (lands, tokens, other costless permanents)
             // is UNPAYABLE — attempting to pay it is an illegal action. No
@@ -15230,32 +15550,18 @@ fn resolve_chain_body(
             // Counter is not prevented (its controller cannot pay). This is the
             // inverse of the `{0}` "players can always pay 0" branch below, and
             // the two must stay distinct: `ManaCost::NoCost != ManaCost::zero()`.
-            if matches!(&resolved_cost, AbilityCost::Mana { cost } if *cost == ManaCost::NoCost) {
+            if unless_cost_is_unpayable(&resolved_cost) {
                 // Unpayable: fall through to execute the effect unconditionally.
-            } else if matches!(&resolved_cost, AbilityCost::Mana { cost } if *cost == ManaCost::zero())
+            } else if matches!(ability.effect, Effect::Counter { .. })
+                && matches!(&resolved_cost, AbilityCost::Mana { cost } if *cost == ManaCost::zero())
             {
-                if matches!(ability.effect, Effect::Counter { .. }) {
-                    // Counter is prevented — spell survives.
-                    events.push(GameEvent::EffectResolved {
-                        kind: EffectKind::Counter,
-                        source_id: ability.source_id,
-                        subject: None,
-                    });
-                    return Ok(());
-                }
-                // Non-counter unless-modified effects: pre-fold behavior was
-                // to fall through and execute the effect.
-                // CR 614.17b: "If an event can't happen, a player can't choose to pay a cost
-                // that includes that event." The CR 118.12a poll's HEAD is the first payer for
-                // whom paying this cost does NOT require an impossible event; when nobody
-                // qualifies, control falls out of this chain and the unless-effect resolves,
-                // exactly as the CR 118.6 unpayable-cost branch in this same chain already does.
-                //
-                // CR 614.17a: only the HEAD is filtered. `remaining` receives the untouched
-                // POSITIONAL tail from the head onward, never a re-derived list, so a
-                // prohibition that lifts mid-window cannot have silently removed a LATER payer
-                // from the poll — `finish_unless_payment` re-asks the question live at each
-                // re-emit. (Payers ahead of the head were asked and could not choose to pay.)
+                // Legacy {0} counter auto-pay; aligning it with CR 118.5's acknowledgment is separate.
+                events.push(GameEvent::EffectResolved {
+                    kind: EffectKind::Counter,
+                    source_id: ability.source_id,
+                    subject: None,
+                });
+                return Ok(());
             } else if let Some((&payer, remaining_payers)) = unless_payers
                 .iter()
                 .position(|p| {
@@ -17169,6 +17475,22 @@ fn resolve_chain_body(
                 effect_context_object.as_ref(),
                 state,
             );
+            if forwards_battlefield_move(ability) {
+                let marker = pending_forwarded_zone_result(state, ability.source_id);
+                let result =
+                    forwarded_zone_result_from_events(state, None, events[events_before..].iter());
+                if marker.group.is_some() || result.object_incarnations.is_empty() {
+                    sub_clone.context.pending_forwarded_zone_result = Some(marker);
+                } else {
+                    bind_moved_objects_to_child(
+                        state,
+                        &mut sub_clone,
+                        ability.source_id,
+                        &ability.targets,
+                        result,
+                    );
+                }
+            }
             prepend_to_pending_continuation(state, sub_clone);
             // CR 701.57c + CR 608.2h: an unconditional Discover follow-up stashed
             // here still binds the hit card as its referent (no-op otherwise).
@@ -17354,89 +17676,13 @@ fn resolve_chain_body(
             );
         } else if ability.forward_result {
             let mut sub_with_context = sub.as_ref().clone();
-            let attachment_candidates = if forwarded_objects.is_empty() {
-                Vec::new()
-            } else {
-                attach::attachment_candidates_from_zone_change(state, sub, &forwarded_objects)
-            };
-            // CR 707.10: `CopySpell { SelfRef }` copies the resolving spell
-            // itself (Sevinne's Reclamation, Chain cycle). `forward_result`
-            // rebinding `source_id` to the just-moved permanent would make
-            // `copy_spell::resolve` look up the wrong stack entry after
-            // `resolve_top` has popped the spell (issue #2860).
-            //
-            // CR 603.7c + CR 201.5: `CreateDelayedTrigger` keeps the creating
-            // ability's source. Its ParentTarget anaphora read the separate
-            // forwarded-result context at delayed-trigger creation.
-            if !forwarded_objects.is_empty()
-                && !copy_spell_self_ref_keeps_resolving_spell_source(sub)
-            {
-                if !matches!(sub.effect, Effect::CreateDelayedTrigger { .. }) {
-                    sub_with_context.source_id = forwarded_objects[0];
-                }
-                if matches!(sub.effect, Effect::Attach { .. }) {
-                    let attach_target_is_last_created = matches!(
-                        &sub.effect,
-                        Effect::Attach {
-                            target: TargetFilter::LastCreated,
-                            ..
-                        }
-                    );
-                    // CR 608.2c: ParentTarget hosts inherit an explicit parent
-                    // choice when present (Necrotic Plague). When none was chosen,
-                    // fall back to the ability source as host — CR 301.5b +
-                    // CR 701.3a put→attach-to-~ (Iron Man, Armored Skyhunter).
-                    // Do not append the source on top of an already-bound host:
-                    // that would let ParentTarget resolve to the returned Aura.
-                    let attach_target_is_parent = matches!(
-                        &sub.effect,
-                        Effect::Attach {
-                            target: TargetFilter::ParentTarget,
-                            ..
-                        }
-                    );
-                    if attach_target_is_parent {
-                        if sub_with_context.targets.is_empty() {
-                            if !ability.targets.is_empty() {
-                                sub_with_context.targets = ability.targets.clone();
-                            } else {
-                                sub_with_context
-                                    .targets
-                                    .push(TargetRef::Object(ability.source_id));
-                            }
-                        }
-                    } else if !attach_target_is_last_created
-                        && !sub_with_context
-                            .targets
-                            .iter()
-                            .any(|t| matches!(t, TargetRef::Object(id) if *id == ability.source_id))
-                    {
-                        sub_with_context
-                            .targets
-                            .push(TargetRef::Object(ability.source_id));
-                    }
-                }
-                // CR 608.2c: OriginalSource names the ability's TRUE pre-rebind source — the
-                // reanimator-Aura's own identity — surviving the forward_result rebind above
-                // that would otherwise point source_id at the just-reanimated creature
-                // instead of the Aura whose own keyword text this static is rewriting
-                // (Animate Dead / Dance of the Dead class: "it loses ... and gains ...").
-                // Concretized here, eagerly, in-place — never persisted as a ResolvedAbility
-                // field — because this is the ONE point in the whole chain where the
-                // pre-rebind `ability.source_id` and the about-to-be-mutated clone coexist.
-                if let Effect::GenericEffect {
-                    static_abilities, ..
-                } = &mut sub_with_context.effect
-                {
-                    for sd in static_abilities.iter_mut() {
-                        if sd.affected == Some(TargetFilter::OriginalSource) {
-                            sd.affected = Some(TargetFilter::SpecificObject {
-                                id: ability.source_id,
-                            });
-                        }
-                    }
-                }
-            }
+            let attachment_candidates = rebind_child_to_forwarded_objects(
+                state,
+                &mut sub_with_context,
+                ability.source_id,
+                &ability.targets,
+                &forwarded_objects,
+            );
             apply_parent_chain_context(
                 &mut sub_with_context,
                 ability,
@@ -17447,13 +17693,11 @@ fn resolve_chain_body(
             // from ordinary declared targets. A nested producer replaces this
             // value after its own parent context has been applied; `Some([])`
             // deliberately records a completed zero-object move.
-            sub_with_context.context.forwarded_result_context = Some(Box::new(
+            bind_forwarded_zone_result(
+                &mut sub_with_context,
                 ForwardedResultContext::from_object_ids(state, &forwarded_objects),
-            ));
-            bind_forwarded_result_targets_for_legacy_effect(&mut sub_with_context);
-            if !attachment_candidates.is_empty() {
-                sub_with_context.bind_attach_attachment_candidates(attachment_candidates);
-            }
+                attachment_candidates,
+            );
             resolve_ability_chain(state, &sub_with_context, events, depth + 1)?;
         } else if sub.targets.is_empty()
             && !state.last_revealed_ids.is_empty()
@@ -17758,7 +18002,7 @@ fn resolved_unless_cost(
     ability: &ResolvedAbility,
     cost: &AbilityCost,
 ) -> AbilityCost {
-    match cost {
+    let expanded = match cost {
         AbilityCost::PerCounter {
             counter,
             target,
@@ -17805,25 +18049,59 @@ fn resolved_unless_cost(
                 cost: ManaCost::generic(amount.max(0) as u32),
             }
         }
-        // CR 118.12 + CR 202.1: "unless you pay its mana cost" — materialize
-        // the ability source's OWN printed mana cost at resolution time. The
-        // cost is dynamic because the granting Aura can be attached to any
-        // permanent (Pendrell Flux, Disruption Aura). An absent source or a
-        // costless source (land, token, other permanent with no mana cost)
-        // resolves to `ManaCost::NoCost`, which CR 118.6 / CR 202.1b define
-        // as an UNPAYABLE cost; the dedicated unpayable branch in `resolve_chain_body` handles
-        // it (kept distinct from the `{0}` "always payable" short-circuit).
-        AbilityCost::Mana {
-            cost: ManaCost::SelfManaCost,
-        } => {
-            let cost = state
-                .objects
-                .get(&ability.source_id)
-                .map(|obj| obj.mana_cost.clone())
-                .unwrap_or(ManaCost::NoCost);
-            AbilityCost::Mana { cost }
-        }
         other => other.clone(),
+    };
+    // CR 118.12 + CR 202.1: "unless you pay its mana cost" — materialize
+    // the ability source's OWN printed mana cost at resolution time. The
+    // cost is dynamic because the granting Aura can be attached to any
+    // permanent (Pendrell Flux, Disruption Aura). An absent source or a
+    // costless source (land, token, other permanent with no mana cost)
+    // resolves to `ManaCost::NoCost`, which CR 118.6 / CR 202.1b define
+    // as an UNPAYABLE cost; the dedicated unpayable branch in `resolve_chain_body` handles
+    // it (kept distinct from a payable `{0}`).
+    crate::game::keywords::resolve_self_mana_in_ability_cost(state, ability.source_id, &expanded)
+}
+
+/// CR 118.6: a cost that requires paying a nonexistent mana cost can't be paid.
+fn unless_cost_is_unpayable(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::Mana { cost } => *cost == ManaCost::NoCost,
+        AbilityCost::Composite { costs } => costs.iter().any(unless_cost_is_unpayable),
+        AbilityCost::OneOf { costs } => {
+            !costs.is_empty() && costs.iter().all(unless_cost_is_unpayable)
+        }
+        AbilityCost::Waterbend { cost }
+        | AbilityCost::NinjutsuFamily {
+            mana_cost: cost, ..
+        } => *cost == ManaCost::NoCost,
+        AbilityCost::PerCounter { base, .. } => unless_cost_is_unpayable(base),
+        AbilityCost::ManaDynamic { .. }
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::Sacrifice(_)
+        | AbilityCost::PayLife { .. }
+        | AbilityCost::Discard { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::ExileWithAggregate { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::PayEnergy { .. }
+        | AbilityCost::PaySpeed { .. }
+        | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Unattach
+        | AbilityCost::UnattachFrom { .. }
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Blight { .. }
+        | AbilityCost::Reveal { .. }
+        | AbilityCost::Behold { .. }
+        | AbilityCost::EffectCost { .. }
+        | AbilityCost::KeywordCostOfCastSpell { .. }
+        | AbilityCost::GetPlayerCounters { .. }
+        | AbilityCost::Unimplemented { .. } => false,
     }
 }
 
@@ -19231,10 +19509,22 @@ fn resolve_unless_payer(
         }
         // CR 118.12a + CR 608.2f: "Each player/each opponent ... unless they pay" —
         // the payer is the player_scope iteration's scoped player, not a chosen
-        // target. resolve_effect_player_ref maps ScopedPlayer -> ability.scoped_player
-        // (bound per-iteration by the fan-out at effects/mod.rs:3015-3069).
+        // target. resolve_effect_player_ref maps ScopedPlayer -> ability.scoped_player,
+        // bound per-iteration by `split_player_scope_chain` /
+        // `set_scoped_player_recursive` in `resolve_chain_body`. Unlike every other
+        // payer here, `None` means that per-iteration binding was missed rather than
+        // that an event or a chosen target was absent, so it gets its own warn.
         TargetFilter::ScopedPlayer => {
-            crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
+            let resolved = crate::game::targeting::resolve_effect_player_ref(state, ability, payer);
+            if resolved.is_none() {
+                tracing::warn!(
+                    ?payer,
+                    source_id = ?ability.source_id,
+                    "scope-bound unless-payer resolved outside a player_scope iteration; \
+                     the payment is skipped and the unless-effect applies unconditionally"
+                );
+            }
+            resolved
         }
         // CR 115.1 + CR 118.12a: a payer DECLARED as a target inside the unless
         // clause ("unless target opponent/target player pays") resolves to the
@@ -25791,6 +26081,86 @@ mod tests {
             )),
             "ParentTarget must not fall back to the source permanent"
         );
+    }
+
+    #[test]
+    fn unless_cost_resolves_self_mana_inside_composite() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source).unwrap().mana_cost = ManaCost::generic(3);
+        let ability = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::SelfManaCostReduced { reduction: 2 },
+                },
+                AbilityCost::Mana {
+                    cost: ManaCost::SelfManaCost,
+                },
+            ],
+        };
+        assert_eq!(
+            resolved_unless_cost(&state, &ability, &cost),
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(1),
+                    },
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(3),
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn unless_cost_with_nested_no_cost_is_unpayable() {
+        let no_cost = AbilityCost::Mana {
+            cost: ManaCost::NoCost,
+        };
+        let payable = AbilityCost::Mana {
+            cost: ManaCost::generic(1),
+        };
+        assert!(unless_cost_is_unpayable(&AbilityCost::Composite {
+            costs: vec![payable.clone(), no_cost.clone()],
+        }));
+        assert!(!unless_cost_is_unpayable(&AbilityCost::OneOf {
+            costs: vec![payable.clone(), no_cost.clone()],
+        }));
+        assert!(unless_cost_is_unpayable(&AbilityCost::OneOf {
+            costs: vec![no_cost],
+        }));
+        assert!(!unless_cost_is_unpayable(&payable));
+        assert!(unless_cost_is_unpayable(&AbilityCost::Waterbend {
+            cost: ManaCost::NoCost,
+        }));
+        assert!(unless_cost_is_unpayable(&AbilityCost::NinjutsuFamily {
+            variant: crate::types::ability::NinjutsuVariant::Ninjutsu,
+            mana_cost: ManaCost::NoCost,
+        }));
+        assert!(unless_cost_is_unpayable(&AbilityCost::PerCounter {
+            counter: CounterType::Age,
+            target: TargetFilter::SelfRef,
+            base: Box::new(AbilityCost::Mana {
+                cost: ManaCost::NoCost,
+            }),
+        }));
     }
 
     #[test]
