@@ -618,7 +618,11 @@ fn add_red_mana(runner: &mut GameRunner, count: u32) {
     }
 }
 
-fn resolve_transformed_entry(runner: &mut GameRunner, object_id: ObjectId) {
+fn resolve_transformed_entry_under(
+    runner: &mut GameRunner,
+    object_id: ObjectId,
+    enters_under: Option<ControllerRef>,
+) {
     let resolved = ResolvedAbility::new(
         Effect::ChangeZone {
             origin: None,
@@ -626,7 +630,7 @@ fn resolve_transformed_entry(runner: &mut GameRunner, object_id: ObjectId) {
             target: TargetFilter::SelfRef,
             owner_library: false,
             enter_transformed: true,
-            enters_under: None,
+            enters_under,
             enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
@@ -642,6 +646,10 @@ fn resolve_transformed_entry(runner: &mut GameRunner, object_id: ObjectId) {
     let mut events = Vec::new();
     engine::game::effects::resolve_ability_chain(runner.state_mut(), &resolved, &mut events, 0)
         .expect("transformed battlefield entry resolves");
+}
+
+fn resolve_transformed_entry(runner: &mut GameRunner, object_id: ObjectId) {
+    resolve_transformed_entry_under(runner, object_id, None);
 }
 
 /// (CR 614.12 + CR 712.14a): a back face's own mandatory as-enters counter
@@ -700,6 +708,84 @@ fn ral_returned_transformed_applies_back_face_loyalty_replacement() {
         Some(3),
         "CR 614.12 + CR 712.14a: printed loyalty 2 plus the back face's own \
          replacement (+1 for the instant cast this turn)"
+    );
+}
+
+/// (CR 614.12 + CR 110.2a + CR 108.4a) a back-face mandatory as-enters counter
+/// replacement reads "you" as the entering controller, not the owner, when an
+/// effect returns another player's double-faced card to the battlefield
+/// transformed under a different player's control.
+#[test]
+fn ral_returned_transformed_under_non_owner_counts_entering_controllers_spells() {
+    let db = shared_card_db().expect("integration fixture must be present");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ral = scenario.add_real_card(P1, "Ral, Monsoon Mage", Zone::Exile, db);
+    let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Hand, db);
+    let mut runner = scenario.build();
+    add_red_mana(&mut runner, 1);
+
+    runner.cast(bolt).target_player(P1).resolve();
+
+    // Reach guards: P0 (the entering controller) cast one instant this turn,
+    // P1 (the owner) cast none, Ral's owner is P1, and the back face carries
+    // exactly one `Moved` replacement (the loyalty bonus).
+    assert_eq!(
+        runner
+            .state()
+            .spells_cast_this_turn_by_player
+            .get(&P0)
+            .map_or(0, |v| v.len()),
+        1
+    );
+    assert_eq!(
+        runner
+            .state()
+            .spells_cast_this_turn_by_player
+            .get(&P1)
+            .map_or(0, |v| v.len()),
+        0
+    );
+    assert_eq!(runner.state().objects[&ral].owner, P1);
+    assert_eq!(
+        runner.state().objects[&ral].controller,
+        P1,
+        "reach guard: Ral's stored controller field is the owner while it sits off the \
+         battlefield, distinct from the entering controller the transformed entry installs"
+    );
+    {
+        let obj = &runner.state().objects[&ral];
+        let back = obj.back_face.as_ref().expect("Ral must have a back face");
+        assert_eq!(
+            back.replacement_definitions
+                .iter_unchecked()
+                .filter(|def| def.event == ReplacementEvent::Moved)
+                .count(),
+            1
+        );
+    }
+
+    resolve_transformed_entry_under(&mut runner, ral, Some(ControllerRef::You));
+
+    let obj = &runner.state().objects[&ral];
+    assert_eq!(obj.name, "Ral, Leyline Prodigy");
+    assert!(obj.transformed);
+    assert_eq!(
+        obj.zone,
+        Zone::Battlefield,
+        "CR 614.12 + CR 712.14a: the transformed entry must deliver Ral to the battlefield"
+    );
+    assert_eq!(obj.owner, P1);
+    assert_eq!(
+        obj.controller, P0,
+        "reach guard: the enters_under override must deliver Ral under the entering \
+         controller, not its owner"
+    );
+    assert_eq!(
+        obj.counters.get(&CounterType::Loyalty).copied(),
+        Some(3),
+        "CR 614.12: printed 2 + 1 for the instant the ENTERING controller (P0) cast; \
+         the owner (P1) cast none"
     );
 }
 

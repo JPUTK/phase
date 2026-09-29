@@ -684,10 +684,10 @@ fn battle_protector_cannot_attack_own_battle() {
 /// Drive P0's real Siege `name` through combat damage from a P0 attacker with
 /// `attacker_power` power (first strike if requested), stopping at the first
 /// decision point after the last defense counter is removed. `graveyard_creature`
-/// seeds a real "Graveyard Bear" 2/2 into P1's graveyard (Lazotep Convert's
+/// seeds a synthetic "Graveyard Bear" 2/2 into P1's graveyard (Lazotep Convert's
 /// copy target). `p1_real_permanents` are added to P1's battlefield
 /// as real cards (Kismet, for the Kismet-vs-copy ordering test). Returns the
-/// runner, the battle's `ObjectId`, and every event from the attack
+/// runner, the battle's `ObjectId`, and every event after the attack
 /// declaration through the damage action.
 fn defeat_siege_in_combat(
     name: &str,

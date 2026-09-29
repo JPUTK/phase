@@ -7900,9 +7900,18 @@ fn stage_transformed_entry_projection(
     // `stack.rs`, `zones.rs` and `casting.rs` make on live objects.
     crate::game::printed_cards::swap_object_faces(&mut projected);
     projected.transformed = true;
-    if let Some(controller) = controller_override {
-        projected.controller = controller;
-    }
+    // CR 614.12: replacement effects check "the permanent as it would exist
+    // on the battlefield", so the projection IS that entering object — in
+    // `Zone::Battlefield`, as `reserve_liminal_token_object` stages a
+    // liminal token — and every `controller_or_owner()` reader
+    // (`replacement_source_player`) answers its controller, not the
+    // CR 108.4a owner fallback of the zone it is leaving.
+    // CR 110.2 + CR 110.2a + CR 110.2b: that controller mirrors delivery
+    // exactly — `GameObject::reset_for_battlefield_entry` resets it to the
+    // owner and `zones::apply_battlefield_entry_controller_override` installs
+    // the event's override (always `Some(caster)` on the cast route).
+    projected.zone = Zone::Battlefield;
+    projected.controller = controller_override.unwrap_or(projected.owner);
     let name = projected.name.clone();
     let controller = projected.controller;
 
@@ -7952,8 +7961,8 @@ fn release_transformed_entry_projection(
 }
 
 /// CR 614.12: an object whose pending `ZoneChange` no longer proposes a
-/// transformed battlefield entry (a replacement rewrote its destination or
-/// cleared `enter_transformed` during an earlier pause) but whose
+/// transformed battlefield entry (a replacement redirected it off the
+/// battlefield during an earlier pause) but whose
 /// `TransformedEntry` projection is still resident. `continue_replacement`
 /// hands this object to `release_transformed_entry_projection` so the
 /// projection is removed by the same resume that finally delivers the event,
@@ -9109,10 +9118,12 @@ fn extract_etb_counters_from_effect(
             let n = match count {
                 QuantityExpr::Fixed { value } => (*value).max(0) as u32,
                 other => {
+                    // CR 614.12 + CR 109.5: "you" in an entering object's own counter replacement
+                    // is the controller of the permanent as it would exist on the battlefield — the
+                    // resident liminal projection when one is staged.
                     let controller = state
-                        .objects
-                        .get(&source_id)
-                        .map(|obj| obj.controller)
+                        .entering_or_live_object(source_id)
+                        .map(replacement_source_player)
                         .unwrap_or(PlayerId(0));
                     crate::game::quantity::resolve_quantity_with_ctx(state, other, controller, ctx)
                         .max(0) as u32
@@ -9126,10 +9137,12 @@ fn extract_etb_counters_from_effect(
         } => enter_with_counters
             .iter()
             .map(|(counter_type, count)| {
+                // CR 614.12 + CR 109.5: "you" in an entering object's own counter replacement
+                // is the controller of the permanent as it would exist on the battlefield — the
+                // resident liminal projection when one is staged.
                 let controller = state
-                    .objects
-                    .get(&source_id)
-                    .map(|obj| obj.controller)
+                    .entering_or_live_object(source_id)
+                    .map(replacement_source_player)
                     .unwrap_or(PlayerId(0));
                 let ctx = crate::game::quantity::QuantityContext {
                     entering: event.affected_object_id(),
@@ -11804,7 +11817,7 @@ pub fn continue_replacement(
     // (`continue_replacement_impl`'s re-park through `pending_replacement`)
     // gets restaged. A pending event that no longer proposes a transformed
     // battlefield entry at all (an earlier pause redirected its destination
-    // off the battlefield or cleared `enter_transformed`) still hands a
+    // off the battlefield) still hands a
     // resident projection to `stranded_transformed_entry_projection`, so the
     // terminal result below releases it instead of leaving it resident past
     // this event's delivery.
