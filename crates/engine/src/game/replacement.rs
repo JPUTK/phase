@@ -7951,6 +7951,33 @@ fn release_transformed_entry_projection(
     }
 }
 
+/// CR 614.12: an object whose pending `ZoneChange` no longer proposes a
+/// transformed battlefield entry (a replacement rewrote its destination or
+/// cleared `enter_transformed` during an earlier pause) but whose
+/// `TransformedEntry` projection is still resident. `continue_replacement`
+/// hands this object to `release_transformed_entry_projection` so the
+/// projection is removed by the same resume that finally delivers the event,
+/// instead of staying resident because the event it was built for no longer
+/// matches `transformed_entry_entrant`.
+fn stranded_transformed_entry_projection(
+    state: &GameState,
+    event: &ProposedEvent,
+) -> Option<ObjectId> {
+    let ProposedEvent::ZoneChange { object_id, .. } = event else {
+        return None;
+    };
+    if matches!(
+        state
+            .liminal_entries
+            .get(object_id)
+            .map(|entry| &entry.kind),
+        Some(LiminalEntryKind::TransformedEntry)
+    ) {
+        return Some(*object_id);
+    }
+    None
+}
+
 fn legacy_object_replacement_candidates(
     state: &GameState,
     event: &ProposedEvent,
@@ -11770,11 +11797,17 @@ pub fn continue_replacement(
 ) -> ReplacementResult {
     // CR 614.12: a resumed pause reuses its own resident `TransformedEntry`
     // projection (staged when the pause first parked, still needed by the
-    // resume's label/choice reads) rather than rebuilding it. Any other
-    // pending event re-runs the ordinary stage/stale-guard path — this is
-    // also how a projection released during a MayCost `PausedForChoice` pause
+    // resume's label/choice reads) rather than rebuilding it. Any pending
+    // event that is still a transformed battlefield entry but has no resident
+    // projection runs the ordinary stage/stale-guard path instead — this is
+    // how a projection released during a MayCost `PausedForChoice` pause
     // (`continue_replacement_impl`'s re-park through `pending_replacement`)
-    // gets restaged.
+    // gets restaged. A pending event that no longer proposes a transformed
+    // battlefield entry at all (an earlier pause redirected its destination
+    // off the battlefield or cleared `enter_transformed`) still hands a
+    // resident projection to `stranded_transformed_entry_projection`, so the
+    // terminal result below releases it instead of leaving it resident past
+    // this event's delivery.
     let pending_event = state
         .pending_replacement
         .as_ref()
@@ -11789,6 +11822,7 @@ pub fn continue_replacement(
             }
         }
         stage_transformed_entry_projection(state, proposed)
+            .or_else(|| stranded_transformed_entry_projection(state, proposed))
     });
     let result = continue_replacement_impl(state, chosen_index, events);
     clear_replacement_index_pipeline(state);
@@ -12834,6 +12868,165 @@ mod tests {
             "accepted optional replacement must dirty the derived index"
         );
         assert!(!state.replacement_index.pipeline_active);
+    }
+
+    /// CR 614.12: a `TransformedEntry` projection staged for an entrant's
+    /// transformed battlefield entry must not survive past the event that
+    /// finally delivers it, even when the entry is redirected off the
+    /// battlefield across more than one `continue_replacement` resume before
+    /// the pipeline reaches a terminal result. Mirrors
+    /// `finality_competes_by_identity_and_resumes_through_the_cr_616_choice`'s
+    /// use of a cross-object `redirect_repl` and hand-driven
+    /// `replace_event`/`continue_replacement` resumes.
+    #[test]
+    fn continue_replacement_releases_stranded_transformed_entry_projection() {
+        let entrant = ObjectId(70);
+        let mut state = test_state_with_object(entrant, Zone::Exile, vec![]);
+        let back_face = crate::game::game_object::BackFaceData {
+            is_swap_snapshot: false,
+            trigger_printed_origins: Vec::new(),
+            name: "Test Back".to_string(),
+            power: Some(2),
+            toughness: Some(2),
+            loyalty: None,
+            printed_loyalty: None,
+            defense: None,
+            card_types: crate::types::card_type::CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![],
+            },
+            mana_cost: crate::types::mana::ManaCost::default(),
+            keywords: vec![],
+            abilities: vec![],
+            trigger_definitions: Default::default(),
+            replacement_definitions: Default::default(),
+            static_definitions: Default::default(),
+            color: vec![],
+            printed_ref: None,
+            modal: None,
+            additional_cost: None,
+            strive_cost: None,
+            casting_restrictions: vec![],
+            casting_options: vec![],
+            layout_kind: None,
+            parse_warnings: vec![],
+        };
+        state.objects.get_mut(&entrant).unwrap().back_face = Some(back_face);
+
+        // Another source offers to redirect the entrant's battlefield entry
+        // to exile instead, as an optional "may" so the pipeline pauses
+        // before applying it (mirrors `redirect_repl`'s cross-object use
+        // above: the definition's bearer is not the object being moved).
+        let redirect_to_exile = ObjectId(71);
+        let mut redirect_to_exile_obj = GameObject::new(
+            redirect_to_exile,
+            CardId(2),
+            PlayerId(0),
+            "Redirect To Exile".to_string(),
+            Zone::Battlefield,
+        );
+        redirect_to_exile_obj.replacement_definitions = vec![redirect_repl(Zone::Exile)
+            .destination_zone(Zone::Battlefield)
+            .mode(ReplacementMode::Optional { decline: None })]
+        .into();
+        state
+            .objects
+            .insert(redirect_to_exile, redirect_to_exile_obj);
+        state.battlefield.push_back(redirect_to_exile);
+
+        // A second source offers a further optional redirect once the entry
+        // is headed to exile, so accepting the first redirect parks a SECOND
+        // pause instead of resolving straight to a terminal result.
+        let redirect_from_exile = ObjectId(72);
+        let mut redirect_from_exile_obj = GameObject::new(
+            redirect_from_exile,
+            CardId(3),
+            PlayerId(0),
+            "Redirect From Exile".to_string(),
+            Zone::Battlefield,
+        );
+        redirect_from_exile_obj.replacement_definitions = vec![redirect_repl(Zone::Hand)
+            .destination_zone(Zone::Exile)
+            .mode(ReplacementMode::Optional { decline: None })]
+        .into();
+        state
+            .objects
+            .insert(redirect_from_exile, redirect_from_exile_obj);
+        state.battlefield.push_back(redirect_from_exile);
+
+        let mut proposed =
+            ProposedEvent::zone_change(entrant, Zone::Exile, Zone::Battlefield, None);
+        if let ProposedEvent::ZoneChange {
+            enter_transformed, ..
+        } = &mut proposed
+        {
+            *enter_transformed = true;
+        }
+
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+        assert_eq!(
+            result,
+            ReplacementResult::NeedsChoice(PlayerId(0)),
+            "the first redirect must pause for its accept/decline choice"
+        );
+        // Positive reach guard: the projection is resident going into the
+        // park — otherwise the final negative assertion below would be
+        // vacuous.
+        assert!(
+            matches!(
+                state.liminal_entries.get(&entrant).map(|entry| &entry.kind),
+                Some(LiminalEntryKind::TransformedEntry)
+            ),
+            "staging must have projected the entrant's back face while paused"
+        );
+
+        let result = continue_replacement(&mut state, 0, &mut events);
+        assert_eq!(
+            result,
+            ReplacementResult::NeedsChoice(PlayerId(0)),
+            "accepting the first redirect must immediately hit the second pause"
+        );
+        assert!(
+            matches!(
+                state.liminal_entries.get(&entrant).map(|entry| &entry.kind),
+                Some(LiminalEntryKind::TransformedEntry)
+            ),
+            "the projection must still be resident through the second pause"
+        );
+        let ProposedEvent::ZoneChange { to, .. } = &state
+            .pending_replacement
+            .as_ref()
+            .expect("second redirect choice must still be parked")
+            .proposed
+        else {
+            panic!("expected a parked ZoneChange after the first redirect");
+        };
+        assert_eq!(
+            *to,
+            Zone::Exile,
+            "the first redirect must already have rewritten the destination off the battlefield"
+        );
+
+        // Decline the second redirect: the entry stays in exile, off the
+        // battlefield, and the pipeline reaches a terminal Execute.
+        let result = continue_replacement(&mut state, 1, &mut events);
+        let ReplacementResult::Execute(ProposedEvent::ZoneChange { to, .. }) = result else {
+            panic!(
+                "expected a terminal Execute once both redirect choices resolve, got {result:?}"
+            );
+        };
+        assert_eq!(
+            to,
+            Zone::Exile,
+            "the resumed event's destination is off the battlefield when delivery is imminent"
+        );
+        assert!(
+            !state.liminal_entries.contains_key(&entrant),
+            "CR 614.12: a TransformedEntry projection must not survive delivery of an event \
+             that no longer proposes a transformed battlefield entry for its entrant"
+        );
     }
 
     #[test]

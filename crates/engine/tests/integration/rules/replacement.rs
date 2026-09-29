@@ -691,6 +691,11 @@ fn ral_returned_transformed_applies_back_face_loyalty_replacement() {
     assert_eq!(obj.name, "Ral, Leyline Prodigy");
     assert!(obj.transformed);
     assert_eq!(
+        obj.zone,
+        Zone::Battlefield,
+        "CR 614.12 + CR 712.14a: the transformed entry must deliver Ral to the battlefield"
+    );
+    assert_eq!(
         obj.counters.get(&CounterType::Loyalty).copied(),
         Some(3),
         "CR 614.12 + CR 712.14a: printed loyalty 2 plus the back face's own \
