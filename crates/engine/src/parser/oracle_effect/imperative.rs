@@ -26,6 +26,7 @@ use super::{
 };
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+use crate::parser::oracle_ir::effect_chain::ChosenReturnSpec;
 use crate::parser::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
 use crate::parser::oracle_nom::condition as nom_condition;
 use crate::parser::oracle_nom::enters_under::{bind_control_clause, name_entry_control_antecedent};
@@ -45,16 +46,16 @@ use crate::parser::oracle_static::{
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AttachCardinality,
     AttachSelection, BounceSelection, CardSelectionMode, CategoryChooserScope, ChoiceType, Chooser,
-    ContinuousModification, ControlWindow, ControllerRef, CopyRetargetPermission,
-    CounterAdjustment, CounterKindChooser, CounterKindDomain, DigSource, DoorLockOp, Duration,
-    Effect, EffectScope, ExtraPhaseAnchor, FaceDownProfile, FilterProp, ForceBlockAttackerRef,
-    GrantedAbilityScope, LibraryPosition, MassLibraryShuffleMode, MultiTargetSpec,
-    ObjectSelectionCardinality, ObjectSelectionEligibility, OutsideGameSourcePool, PerPlayerScope,
-    PlayerFilter, PlayerRelation, PlayerScope, PossessionAxis, PreventionAmount, PreventionScope,
-    PtStat, PtValue, QuantityExpr, QuantityRef, ReassembleControlMode, SearchSelectionConstraint,
-    StaticDefinition, StickerTicketCostPayment, TapStateChange, TargetChoiceTiming, TargetFilter,
-    TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter, ZoneChoiceCandidateSource,
-    ZoneOwner,
+    ContinuousModification, ControlWindow, ControllerRef, CopyRetargetPermission, CountBinding,
+    CountScope, CounterAdjustment, CounterKindChooser, CounterKindDomain, DigSource, DoorLockOp,
+    Duration, Effect, EffectScope, ExtraPhaseAnchor, FaceDownProfile, FilterProp,
+    ForceBlockAttackerRef, GrantedAbilityScope, LibraryPosition, MassLibraryShuffleMode,
+    MultiTargetSpec, ObjectSelectionCardinality, ObjectSelectionEligibility, OutsideGameSourcePool,
+    PerPlayerScope, PlayerFilter, PlayerRelation, PlayerScope, PossessionAxis, PreventionAmount,
+    PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef, ReassembleControlMode,
+    ReturnResultReadSpec, SearchSelectionConstraint, StaticDefinition, StickerTicketCostPayment,
+    TapStateChange, TargetChoiceTiming, TargetFilter, TargetSelectionMode, ThisWayCause,
+    TypeFilter, TypedFilter, ZoneChoiceCandidateSource, ZoneOwner, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::{Phase, PhaseGroup};
@@ -1761,6 +1762,99 @@ pub(super) fn add_another_to_filter_recursive(filter: &mut TargetFilter) {
 /// NOTE: Shares verb prefixes with `try_parse_verb_and_target` in `mod.rs`.
 /// When adding a new targeted verb here, check if it also needs to be added there
 /// (for compound action splitting like "tap target creature and put a counter on it").
+/// Parse a return of the targets named by an earlier choose instruction.
+/// The destination and noun use the same helpers as ordinary return clauses.
+pub(crate) fn parse_chosen_return_spec(text: &str, lower: &str) -> Option<ChosenReturnSpec> {
+    let (_, rest) = nom_on_lower(text, lower, |input| {
+        value((), tag("return each ")).parse(input)
+    })?;
+    let (phrase, destination, remainder) = super::strip_return_destination_ext_with_remainder(rest);
+    let destination = destination?;
+    if destination.zone != Zone::Hand {
+        return None;
+    }
+    let consumed_end = rest.len().checked_sub(remainder.len())?;
+    let printed_destination = rest.get(phrase.len()..consumed_end)?.to_ascii_lowercase();
+    let recipient = all_consuming(tag::<_, _, OracleError<'_>>(" to your hand"))
+        .parse(printed_destination.as_str())
+        .ok()
+        .map(|_| ControllerRef::You);
+    let phrase_lower = phrase.trim().trim_end_matches('.').to_ascii_lowercase();
+    let (noun, chooser) = if let Ok((_, noun)) = all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("chosen "),
+        nom::combinator::rest,
+    ))
+    .parse(phrase_lower.as_str())
+    {
+        (noun, None)
+    } else if let Ok((_, noun)) = all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>(" you chose"),
+        tag(" you chose"),
+    ))
+    .parse(phrase_lower.as_str())
+    {
+        (noun, Some(TargetFilter::Controller))
+    } else if let Ok((_, noun)) = all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>(" that opponent chose"),
+        tag(" that opponent chose"),
+    ))
+    .parse(phrase_lower.as_str())
+    {
+        (noun, Some(TargetFilter::Opponent))
+    } else {
+        return None;
+    };
+    let (noun, remainder) = parse_target(noun);
+    if !remainder.trim().is_empty() || matches!(noun, TargetFilter::None | TargetFilter::Any) {
+        return None;
+    }
+    Some(ChosenReturnSpec {
+        noun,
+        chooser,
+        destination: destination.zone,
+        recipient,
+    })
+}
+
+/// Parse the typed prior-object count carried by a later delayed clause.
+/// `None` means no such reader; `Some(None)` is a detected but unsupported one.
+pub(crate) fn parse_returned_this_way_quantity(
+    lower: &str,
+) -> Option<Option<ReturnResultReadSpec>> {
+    let (_, (noun, destination)) = preceded(
+        take_until::<_, _, OracleError<'_>>("for each "),
+        preceded(
+            tag("for each "),
+            pair(
+                take_until(" returned to "),
+                preceded(
+                    tag(" returned to "),
+                    terminated(take_until(" this way"), tag(" this way")),
+                ),
+            ),
+        ),
+    )
+    .parse(lower)
+    .ok()?;
+    let (noun_filter, noun_rest) = parse_target(noun);
+    let supported_noun = noun_rest.trim().is_empty()
+        && matches!(
+            &noun_filter,
+            TargetFilter::Typed(typed) if !typed.type_filters.is_empty()
+                && typed.controller.is_none() && typed.properties.is_empty()
+        );
+    let supported_destination = all_consuming(tag::<_, _, OracleError<'_>>("your hand"))
+        .parse(destination)
+        .is_ok();
+    Some(
+        (supported_noun && supported_destination).then_some(ReturnResultReadSpec {
+            noun: noun_filter,
+            destination: Zone::Hand,
+            recipient: ControllerRef::You,
+        }),
+    )
+}
+
 pub(super) fn parse_targeted_action_ast(
     text: &str,
     lower: &str,
@@ -2179,6 +2273,14 @@ pub(super) fn parse_targeted_action_ast(
             up_to,
             unless_filter,
             filter,
+        });
+    }
+    // CR 601.2c + CR 608.2c: A chosen group is a named target antecedent,
+    // not the battlefield population handled by the mass-return arm below.
+    if let Some(spec) = parse_chosen_return_spec(text, lower) {
+        return Some(TargetedImperativeAst::ReturnAll {
+            target: spec.noun,
+            count: None,
         });
     }
     // CR 400.7 + CR 611.2c: Unified `return [all|each]?` dispatcher. Consumes
@@ -4730,7 +4832,14 @@ pub(super) fn parse_choose_ast(
                     text: rest.to_string(),
                 });
             }
-            let (target, _) = parse_target(rest);
+            // This is the legacy, best-effort TargetOnly fallback after the
+            // full effect parser declined the clause. Keep the surrounding
+            // actor/target context for scoped filters, but do not turn its
+            // unclassified fragments into new card-coverage diagnostics.
+            // The former parse_target wrapper discarded those diagnostics.
+            let diagnostic_count = ctx.diagnostics.len();
+            let (target, _) = parse_target_with_ctx(rest, ctx);
+            ctx.diagnostics.truncate(diagnostic_count);
             return Some(ChooseImperativeAst::TargetOnly { target });
         }
     }
@@ -9824,7 +9933,7 @@ fn parse_exile_count_prefix<'a>(text: &'a str, lower: &str) -> Option<(QuantityE
     })
 }
 
-fn terminal_punctuation_only(input: &str) -> bool {
+pub(super) fn terminal_punctuation_only(input: &str) -> bool {
     all_consuming(value(
         (),
         (space0::<_, OracleError<'_>>, opt(one_of(".;")), space0),
@@ -10009,11 +10118,120 @@ fn parse_exile_that_many_from_library_edge(
     Ok((input, (position, player)))
 }
 
+/// CR 401.2 + CR 701.13a: "exile all but the bottom/top N cards of <player>'s library [face down]"
+/// (Doomsday Excruciator, Jace Reality Sculptor, Nicol Bolas the Arisen).
+/// Exiles (library.len() - N) cards from the opposite edge (e.g. from the top down when leaving
+/// N cards at the bottom).
+pub(super) fn try_parse_exile_all_but_edge<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> Option<(&'a str, ZoneCounterImperativeAst)> {
+    let (after_verb, is_third_person) = alt((
+        value(false, tag::<_, _, OracleError<'_>>("exile all but the ")),
+        value(true, tag::<_, _, OracleError<'_>>("exiles all but the ")),
+    ))
+    .parse(input)
+    .ok()?;
+
+    let (after_edge, position) = alt((
+        value(
+            LibraryPosition::Top,
+            tag::<_, _, OracleError<'_>>("bottom "),
+        ),
+        value(
+            LibraryPosition::Bottom,
+            tag::<_, _, OracleError<'_>>("top "),
+        ),
+    ))
+    .parse(after_verb)
+    .ok()?;
+
+    let (after_num, n) = if let Ok((rem, num)) = nom_primitives::parse_number.parse(after_edge) {
+        (rem.trim_start(), num as i32)
+    } else if let Ok((rem, _)) = alt((
+        tag::<_, _, OracleError<'_>>("a card"),
+        tag::<_, _, OracleError<'_>>("one card"),
+        tag::<_, _, OracleError<'_>>("card"),
+    ))
+    .parse(after_edge)
+    {
+        (rem.trim_start(), 1)
+    } else {
+        return None;
+    };
+
+    let (after_of, _) = alt((
+        tag::<_, _, OracleError<'_>>("cards of "),
+        tag::<_, _, OracleError<'_>>("card of "),
+        tag::<_, _, OracleError<'_>>("of "),
+    ))
+    .parse(after_num)
+    .ok()?;
+
+    let (after_owner, player) = parse_library_owner_or_opponent_scope(after_of, ctx)?;
+    let (tail, face_down) = strip_exile_top_face_down(after_owner);
+
+    let qty = match &player {
+        TargetFilter::Player | TargetFilter::Typed(_) => QuantityRef::TargetZoneCardCount {
+            zone: ZoneRef::Library,
+            scope: if matches!(player, TargetFilter::Typed(_)) {
+                ControllerRef::TargetOpponent
+            } else {
+                ControllerRef::TargetPlayer
+            },
+            binding: CountBinding::Anaphoric,
+        },
+        TargetFilter::Controller => QuantityRef::ZoneCardCount {
+            zone: ZoneRef::Library,
+            card_types: vec![],
+            filter: None,
+            scope: CountScope::Controller,
+        },
+        TargetFilter::ScopedPlayer | TargetFilter::Opponent => QuantityRef::ZoneCardCount {
+            zone: ZoneRef::Library,
+            card_types: vec![],
+            filter: None,
+            scope: CountScope::ScopedPlayer,
+        },
+        // These anaphoric players can differ from the current scoped player.
+        // CountScope has no corresponding owner, so decline the parse rather
+        // than count one library and exile cards from another.
+        _ => return None,
+    };
+
+    let count = QuantityExpr::Offset {
+        inner: Box::new(QuantityExpr::Ref { qty }),
+        offset: -n,
+    };
+
+    let actor = if is_third_person {
+        crate::types::ability::LibraryInstructionActor::LibraryPlayer
+    } else {
+        crate::types::ability::LibraryInstructionActor::Controller
+    };
+
+    Some((
+        tail,
+        ZoneCounterImperativeAst::ExileTop {
+            player,
+            count,
+            position,
+            face_down,
+            actor,
+        },
+    ))
+}
+
 pub(super) fn parse_exile_ast(
     text: &str,
     lower: &str,
     ctx: &mut ParseContext,
 ) -> Option<ZoneCounterImperativeAst> {
+    if let Some((tail, ast)) = try_parse_exile_all_but_edge(lower, ctx) {
+        if terminal_punctuation_only(tail) {
+            return Some(ast);
+        }
+    }
     // CR 701.13a + CR 401.2: A completed-scry trigger provides the only
     // supported provenance for this "that many" library-edge form. Do not
     // borrow generic EventContextAmount here: a textually similar clause in an
@@ -10034,6 +10252,7 @@ pub(super) fn parse_exile_ast(
                 },
                 position,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             });
         }
         // Preserve the pre-existing dynamic top-of-library path below, which
@@ -10089,6 +10308,7 @@ pub(super) fn parse_exile_ast(
                 count,
                 position: LibraryPosition::Top,
                 face_down,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             });
         }
 
@@ -10137,6 +10357,7 @@ pub(super) fn parse_exile_ast(
                     count,
                     position: LibraryPosition::Top,
                     face_down,
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                 });
             }
         }
@@ -10242,6 +10463,7 @@ pub(super) fn parse_exile_ast(
             count,
             position: LibraryPosition::Top,
             face_down,
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
         });
     }
 
@@ -10271,6 +10493,7 @@ pub(super) fn parse_exile_ast(
             count,
             position: LibraryPosition::Top,
             face_down,
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
         });
     }
 
@@ -15661,12 +15884,13 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             count,
             position,
             face_down,
+            actor,
         } => Effect::ExileTop {
             player,
             count,
             position,
             face_down,
-            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            actor,
         },
         ZoneCounterImperativeAst::Counter {
             target,
@@ -22240,6 +22464,92 @@ mod tests {
     }
 
     #[test]
+    fn choose_target_only_fallback_preserves_supported_card_diagnostics() {
+        use crate::parser::oracle::parse_oracle_text;
+
+        for (name, text, types) in [
+            (
+                "Desperate Gambit",
+                "Choose a source you control and flip a coin. If you win the flip, the next time that source would deal damage this turn, it deals double that damage instead. If you lose the flip, the next time it would deal damage this turn, prevent that damage.",
+                vec!["Instant".to_string()],
+            ),
+            (
+                "Global Ruin",
+                "Each player chooses from the lands they control a land of each basic land type, then sacrifices the rest.",
+                vec!["Sorcery".to_string()],
+            ),
+            (
+                "Hive Mind",
+                "Whenever a player casts an instant or sorcery spell, each other player copies that spell. Each of those players may choose new targets for their copy.",
+                vec!["Enchantment".to_string()],
+            ),
+        ] {
+            let parsed = parse_oracle_text(text, name, &[], &types, &[]);
+            assert!(
+                !parsed.abilities.is_empty() || !parsed.triggers.is_empty(),
+                "{name}: card must reach the parser pipeline"
+            );
+            assert!(
+                parsed.parse_warnings.is_empty(),
+                "{name}: fallback must not add a warning: {:?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
+    #[test]
+    fn choose_target_only_fallback_does_not_add_warnings_to_unsupported_cards() {
+        use crate::parser::oracle::parse_oracle_text;
+
+        for (name, text, types) in [
+            (
+                "Aswan Jaguar",
+                "When Aswan Jaguar comes into play, choose a random creature type from those in target opponent's deck.\n{G}{G}, {T}: Bury target creature of the chosen type.",
+                vec!["Creature".to_string()],
+            ),
+            (
+                "Cultural Exchange",
+                "Choose any number of creatures target player controls. Choose the same number of creatures another target player controls. Those players exchange control of those creatures. (This effect lasts indefinitely.)",
+                vec!["Sorcery".to_string()],
+            ),
+            (
+                "Spry and Mighty",
+                "Choose exactly two creatures you control. You draw X cards and the chosen creatures get +X/+X and gain trample until end of turn, where X is the difference between the chosen creatures' powers.",
+                vec!["Sorcery".to_string()],
+            ),
+            (
+                "The Mox Painter",
+                "{1}, {T}: Choose a tournament-legal Mox you don't control at random. Create a token that's a copy of it. Then if you control all ten, create a Mox Lotus token. (The ten are Amber, Chrome, Diamond, Emerald, Jet, Opal, Pearl, Ruby, Sapphire, and Tantalite. Perhaps roll a d10?)\n{W}{U}{B}{R}{G}: Untap The Mox Painter.",
+                vec!["Creature".to_string()],
+            ),
+            (
+                "The Snapstone Wielder",
+                "If The Snapstone Wielder is your commander and your deck contains no land cards, your starting hand size is four and for the rest of the game, at the beginning of your upkeep, you get a mana counter. During each of your turns, you can spend mana of any color equal to the number of mana counters you have. (You want mana on opponent's turns, you're on your own. Who needs instant-speed interaction?)\nWhenever The Snapstone Wielder enters or attacks, cast a random nonland Magic card without paying its mana cost. If it has targets, choose the targets at random.",
+                vec!["Creature".to_string()],
+            ),
+            (
+                "Trigger Happy",
+                "Choose a triggered ability of target permanent. It triggers. You control that ability.",
+                vec!["Instant".to_string()],
+            ),
+        ] {
+            let parsed = parse_oracle_text(text, name, &[], &types, &[]);
+            assert!(
+                !parsed.abilities.is_empty() || !parsed.triggers.is_empty(),
+                "{name}: card must reach the parser pipeline"
+            );
+            assert!(
+                !parsed
+                    .parse_warnings
+                    .iter()
+                    .any(|warning| matches!(warning, OracleDiagnostic::TargetFallback { .. })),
+                "{name}: fallback must not add a target warning: {:?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
+    #[test]
     fn parse_choose_from_among_cataclysm_pattern() {
         // Cataclysm: "choose from among the permanents they control an artifact, ..."
         let text =
@@ -24845,6 +25155,7 @@ mod tests {
                     count: QuantityExpr::Fixed { value: 1 },
                     position: LibraryPosition::Top,
                     face_down: false,
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                 }
             ),
             "expected ExileTop(Controller, 1), got {singular:?}"
@@ -24864,6 +25175,7 @@ mod tests {
                     count: QuantityExpr::Fixed { value: 2 },
                     position: LibraryPosition::Top,
                     face_down: false,
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                 }
             ),
             "expected ExileTop(Controller, 2), got {plural:?}"
@@ -24879,6 +25191,7 @@ mod tests {
                     count: QuantityExpr::Fixed { value: 1 },
                     position: LibraryPosition::Top,
                     face_down: false,
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                 }
             ),
             "expected ExileTop(Controller, 1) at EOF, got {eof:?}"
@@ -24910,6 +25223,7 @@ mod tests {
                 },
                 position: LibraryPosition::Bottom,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ));
 
