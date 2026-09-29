@@ -1967,9 +1967,8 @@ fn is_source_of_ability_not_yet_left_stack(
 /// still on the battlefield when it resolves. A battle with any other battle
 /// type has no such intrinsic, so CR 704.5w grants it no deferral — it is put
 /// into its owner's graveyard immediately, even with one of its own triggered
-/// abilities still on the stack. The deferral now checks the stack or the
-/// caller's waiting batch (has triggered but not yet left the stack, on the
-/// stack or in the caller's waiting batch).
+/// abilities still on the stack. The Siege deferral consults both the stack
+/// and the caller's waiting batch (`is_source_of_ability_not_yet_left_stack`).
 fn check_zero_defense(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,

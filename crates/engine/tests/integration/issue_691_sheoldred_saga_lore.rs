@@ -46,12 +46,10 @@ fn true_scriptures_back_face() -> BackFaceData {
         trigger_definitions: Default::default(),
         // CR 714.3a: every Saga carries the intrinsic "enters with a lore
         // counter" replacement (`parser::oracle_saga::parse_saga_chapters`).
-        // The CR 614.12 transformed-entry replacement pipeline now consults
-        // the back face's own replacement definitions as the single authority
-        // for its lore counter on a transformed entry — real card data
-        // already carries this on "the true scriptures"; the synthetic
-        // fixture must too, or this test's lore count no longer matches the
-        // production pipeline.
+        // On a transformed entry the CR 614.12 projection makes the back
+        // face's own replacement definitions the single authority for its
+        // lore counter; real card data carries this replacement on "the true
+        // scriptures", so this synthetic back face carries it too.
         replacement_definitions: vec![ReplacementDefinition::new(ReplacementEvent::Moved)
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,

@@ -471,8 +471,9 @@ pub fn intrinsic_face_entry_counters(
 
 /// CR 306.5b + CR 310.4b + CR 714.3a: Intrinsic counters for the face a
 /// permanent will have on entry — loyalty/defense from the entering face plus
-/// the Saga lore counter when the entering face is a Saga (CR 712.14a
-/// transformed entry reads the back face here before the physical swap).
+/// the Saga lore counter when the entering face is a Saga (an "enters as a
+/// copy" entry reads the copied face's values here; a transformed entry uses
+/// [`intrinsic_face_entry_counters`] instead, see CR 614.12).
 pub fn intrinsic_entry_counters_for_face(
     printed_loyalty: Option<PrintedLoyalty>,
     fallback_loyalty: Option<u32>,

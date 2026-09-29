@@ -699,10 +699,9 @@ fn ral_returned_transformed_applies_back_face_loyalty_replacement() {
 }
 
 /// (CR 614.12 + CR 714.3a): a back-face Saga entering transformed gets
-/// exactly one lore counter, from its own replacement — dropping the CR 614.12
-/// transformed-entry projection would drop it to 0 (the front-face
-/// suppression special case is gone) and reverting the lore-seeding removal
-/// alone would double it to 2 (intrinsic seeding still running).
+/// exactly one lore counter, from its own replacement applied through the
+/// CR 614.12 transformed-entry projection; the transformed-entry seeding
+/// (`intrinsic_face_entry_counters`) adds no lore counter of its own.
 #[test]
 fn sheoldred_returns_true_scriptures_with_one_lore_counter() {
     let db = shared_card_db().expect("integration fixture must be present");
@@ -719,10 +718,16 @@ fn sheoldred_returns_true_scriptures_with_one_lore_counter() {
             .expect("Sheoldred must have a back face");
         assert_eq!(back.name, "The True Scriptures");
         assert!(back.card_types.subtypes.iter().any(|s| s == "Saga"));
-        assert!(back
-            .replacement_definitions
-            .iter_unchecked()
-            .any(|def| def.event == ReplacementEvent::Moved));
+        assert!(back.replacement_definitions.iter_unchecked().any(|def| {
+            def.event == ReplacementEvent::Moved
+                && matches!(
+                    def.execute.as_deref().map(|a| a.effect.as_ref()),
+                    Some(Effect::PutCounter {
+                        counter_type: CounterType::Lore,
+                        ..
+                    })
+                )
+        }));
     }
 
     resolve_transformed_entry(&mut runner, sheoldred);

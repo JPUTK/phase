@@ -1580,7 +1580,8 @@ fn replacement_choice_label(repl: &ReplacementDefinition) -> String {
 /// reader in this file already performs (`shield_kind_for_rid`,
 /// `consume_prevention_shield`, `update_redirection_shield`, ...): the sentinel
 /// selects `state.pending_damage_replacements`, anything else selects that
-/// object's own `replacement_definitions`. `rid.index` indexes whichever store
+/// object's own `replacement_definitions` (its liminal projection's while one
+/// is resident). `rid.index` indexes whichever store
 /// `rid.source` selected — that pairing is NOT changed here or anywhere else.
 ///
 /// `replacement_definition_for_id` is the rules-side authority (liminal
@@ -7832,8 +7833,9 @@ fn transformed_entry_entrant(state: &GameState, event: &ProposedEvent) -> Option
     }
 }
 
-/// CR 614.12: the object whose stored entrant scan is superseded by a resident
-/// `TransformedEntry` (or meld/token) projection for the same source — the
+/// CR 614.12: whether `source`'s stored definitions are superseded, for the
+/// entry `event` proposes, by a resident liminal projection (`TransformedEntry`
+/// or meld) of the same object — the
 /// projection is that entrant's authority for its own definitions, so offering
 /// the stored object's indices as well would evaluate them against the
 /// projection a second time.
@@ -7849,9 +7851,9 @@ fn stored_entrant_superseded_by_projection(
 /// back-face projection for a transformed battlefield entry so the
 /// replacement pipeline consults the face the permanent will have on the
 /// battlefield, not the face it is leaving. Returns `Some(entrant)` whenever
-/// `event` is a transformed entry, whether or not a projection was freshly
-/// built (a resident `TransformedEntry` projection reaching this function can
-/// only be left over from an abandoned pause, and is unconditionally
+/// `event` is a transformed entry; the projection is always rebuilt from the
+/// stored object (a resident `TransformedEntry` projection reaching this
+/// function can only be left over from an abandoned pause, and is
 /// overwritten — a live pause resumes through `continue_replacement`, which
 /// reuses a resident projection without calling this function).
 fn stage_transformed_entry_projection(
@@ -7892,7 +7894,8 @@ fn stage_transformed_entry_projection(
     };
 
     let mut projected = state.objects.get(&entrant)?.clone();
-    // CR 400.7 + CR 712.8a (#7565): the single symmetric face-swap authority,
+    // CR 712.8c + CR 712.14a (#7565): give the projection its back face's
+    // characteristics through the single symmetric face-swap authority,
     // which also preserves the stored slot's `layout_kind` — the same call
     // `stack.rs`, `zones.rs` and `casting.rs` make on live objects.
     crate::game::printed_cards::swap_object_faces(&mut projected);

@@ -718,6 +718,14 @@ fn defeat_siege_in_combat(
 
     let mut runner = scenario.build();
 
+    if first_strike {
+        assert!(
+            runner.state().objects[&attacker].has_keyword(&Keyword::FirstStrike),
+            "CR 510.4: the attacker must have first strike for the first-strike \
+             damage step to be exercised"
+        );
+    }
+
     // Attacker must be combat-ready (not summoning sick).
     {
         let turn = runner.state().turn_number.saturating_sub(1);
@@ -768,8 +776,8 @@ fn defeat_siege_in_combat(
         "CR 704.5x: the SBA must assign P1 as protector"
     );
 
-    // Advance to Declare Attackers (bounded: a turn has 12 phases/steps,
-    // CR 500.1).
+    // Advance to Declare Attackers (bounded; CR 500.1: the combat phase
+    // directly follows the precombat main phase).
     for _ in 0..8 {
         if matches!(
             runner.state().waiting_for,
@@ -1228,9 +1236,10 @@ fn siege_victory_cast_orders_back_face_copy_against_kismet() {
 
     resolve_victory(&mut runner, battle, true);
 
-    let (copy_index, protector_present, other_description, candidate_count, kind) =
+    let (player, copy_index, protector_present, other_description, candidate_count, kind) =
         match runner.state().waiting_for.clone() {
             WaitingFor::ReplacementChoice {
+                player,
                 candidates,
                 candidate_count,
                 kind,
@@ -1248,6 +1257,7 @@ fn siege_victory_cast_orders_back_face_copy_against_kismet() {
                     .find(|c| c.description != copy_description)
                     .map(|c| c.description.clone());
                 (
+                    player,
                     copy_index,
                     protector_present,
                     other_description,
@@ -1258,6 +1268,10 @@ fn siege_victory_cast_orders_back_face_copy_against_kismet() {
             other => panic!("expected the CR 616.1 ordering prompt, got {other:?}"),
         };
 
+    assert_eq!(
+        player, P0,
+        "CR 616.1: the affected object's controller chooses"
+    );
     assert!(
         !protector_present,
         "CR 614.12: the front face's suppressed protector replacement must \
@@ -1267,9 +1281,20 @@ fn siege_victory_cast_orders_back_face_copy_against_kismet() {
     // be chosen before a CR 616.1e effect such as this one), so it currently
     // offers both as one CR 616.1 ordering choice; this assertion pins that
     // current shape and must change when the precedence is modelled.
-    assert_eq!(candidate_count, 2);
-    assert_eq!(kind, ReplacementChoiceKind::Order);
-    assert_eq!(other_description, Some("Enters tapped".to_string()));
+    assert_eq!(
+        candidate_count, 2,
+        "CR 614.12 (engine's current CR 616.1 prompt shape; CR 616.1c precedence not modelled)"
+    );
+    assert_eq!(
+        kind,
+        ReplacementChoiceKind::Order,
+        "CR 614.12 (engine's current CR 616.1 prompt shape; CR 616.1c precedence not modelled)"
+    );
+    assert_eq!(
+        other_description,
+        Some("Enters tapped".to_string()),
+        "CR 614.12 (engine's current CR 616.1 prompt shape; CR 616.1c precedence not modelled)"
+    );
 
     runner
         .act(GameAction::ChooseReplacement { index: copy_index })
