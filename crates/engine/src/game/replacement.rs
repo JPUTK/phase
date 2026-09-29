@@ -7910,6 +7910,7 @@ fn stage_transformed_entry_projection(
     // exactly — `GameObject::reset_for_battlefield_entry` resets it to the
     // owner and `zones::apply_battlefield_entry_controller_override` installs
     // the event's override (always `Some(caster)` on the cast route).
+    // allow-raw-zone: sets the zone of a detached projection clone staged in `liminal_entries`; the stored object and zone containers are untouched, so no zone change occurs (CR 614.12).
     projected.zone = Zone::Battlefield;
     projected.controller = controller_override.unwrap_or(projected.owner);
     let name = projected.name.clone();
