@@ -1422,6 +1422,7 @@
       "target": "Target",
       "return": "Return",
       "discard": "Discard",
+      "reveal": "Reveal",
       "evidence": "Evidence",
       "manifest": "Manifest",
       "untap": "Untap",
@@ -2335,7 +2336,8 @@
       "zoneExile": "exile",
       "zoneHand": "your hand",
       "discard": "Discard {{count}} {{cards}}",
-      "exile": "Exile {{count}} {{cards}} from {{zone}}"
+      "exile": "Exile {{count}} {{cards}} from {{zone}}",
+      "reveal": "Reveal {{count}} {{cards}} from {{zone}}"
     }
   },
   "topOrBottom": {
