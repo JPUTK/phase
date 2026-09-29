@@ -789,6 +789,135 @@ fn ral_returned_transformed_under_non_owner_counts_entering_controllers_spells()
     );
 }
 
+/// (CR 614.12 + CR 616.1f + CR 110.2a): a back-face dynamic counter replacement
+/// that reads "you" sees the controller an earlier entry-controller replacement
+/// installed, not the controller the entry started with. Ral, Monsoon Mage is
+/// P1's card returned transformed with no controller instruction (so the entry
+/// starts under its owner P1), and its back face additionally carries the
+/// "enters under the control of an opponent of your choice" replacement, which
+/// hands the permanent to P0. The instant P0 cast counts; P1 cast none.
+#[test]
+fn ral_returned_transformed_counts_spells_of_controller_set_by_earlier_entry_replacement() {
+    let db = shared_card_db().expect("integration fixture must be present");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ral = scenario.add_real_card(P1, "Ral, Monsoon Mage", Zone::Exile, db);
+    let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Hand, db);
+    let mut runner = scenario.build();
+    add_red_mana(&mut runner, 1);
+
+    runner.cast(bolt).target_player(P1).resolve();
+
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&ral)
+        .expect("Ral exists")
+        .back_face
+        .as_mut()
+        .expect("Ral must have a back face")
+        .replacement_definitions
+        .push(
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .valid_card(TargetFilter::SelfRef)
+                .destination_zone(Zone::Battlefield)
+                .enters_under(ControllerRef::Opponent)
+                .description("Enters under the control of an opponent of your choice.".to_string()),
+        );
+
+    // Reach guards: P0 cast one instant this turn and P1 none, Ral is P1's
+    // card with P1 as its stored controller (so the entry starts under P1), and
+    // the back face carries two `Moved` replacements (the loyalty bonus and the
+    // controller override).
+    let spells_cast = |runner: &GameRunner, player| {
+        runner
+            .state()
+            .spells_cast_this_turn_by_player
+            .get(&player)
+            .map_or(0, |v| v.len())
+    };
+    assert_eq!(spells_cast(&runner, P0), 1);
+    assert_eq!(spells_cast(&runner, P1), 0);
+    assert_eq!(runner.state().objects[&ral].owner, P1);
+    assert_eq!(runner.state().objects[&ral].controller, P1);
+    {
+        let obj = &runner.state().objects[&ral];
+        let back = obj.back_face.as_ref().expect("Ral must have a back face");
+        assert_eq!(
+            back.replacement_definitions
+                .iter_unchecked()
+                .filter(|def| def.event == ReplacementEvent::Moved)
+                .count(),
+            2
+        );
+    }
+
+    resolve_transformed_entry_under(&mut runner, ral, None);
+
+    // Reach guards: the two back-face replacements are an order-material pair,
+    // so the entry parks for an ordering choice instead of auto-applying.
+    let WaitingFor::ReplacementChoice {
+        player,
+        candidate_count,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected an ordering choice for the two entry replacements, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*candidate_count, 2);
+    // Pins the engine's current ordering-prompt chooser; CR 616.1b itself
+    // leaves no choice here.
+    assert_eq!(*player, P1);
+
+    let state = runner.state();
+    let pending = state
+        .pending_replacement
+        .as_ref()
+        .expect("the parked entry keeps its pending replacement");
+    let index = pending
+        .candidates
+        .iter()
+        .position(|rid| {
+            rid.source == ral
+                && state
+                    .entering_or_live_object(ral)
+                    .and_then(|o| o.replacement_definitions.get(rid.index))
+                    .is_some_and(|d| d.enters_under.is_some())
+        })
+        .expect("the controller-changing replacement is among the candidates");
+
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("the ordering choice resolves");
+
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "no further replacement choice remains, got {:?}",
+        runner.state().waiting_for
+    );
+    let obj = &runner.state().objects[&ral];
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert!(obj.transformed);
+    assert_eq!(obj.name, "Ral, Leyline Prodigy");
+    assert_eq!(obj.owner, P1);
+    assert_eq!(
+        obj.controller, P0,
+        "reach guard: the entry-controller replacement must deliver Ral under P0"
+    );
+    assert_eq!(
+        obj.counters.get(&CounterType::Loyalty).copied(),
+        Some(3),
+        "CR 614.12 + CR 616.1f: printed 2 + 1 for the instant P0, the controller the \
+         earlier replacement installed, cast; the entry's starting controller P1 cast none"
+    );
+}
+
 /// (CR 614.12 + CR 714.3a): a back-face Saga entering transformed gets
 /// exactly one lore counter, from its own replacement applied through the
 /// CR 614.12 transformed-entry projection; the transformed-entry seeding

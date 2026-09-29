@@ -7988,6 +7988,38 @@ fn stranded_transformed_entry_projection(
     None
 }
 
+/// CR 614.12 + CR 616.1f: re-derive a resident `TransformedEntry` projection's
+/// controller from the entry event as it now stands. Replacement effects check
+/// the permanent as it would exist on the battlefield, "taking into account
+/// replacement effects that have already modified how it enters", and the
+/// choice process repeats after each applied effect, so an applied
+/// entry-controller replacement (CR 110.2a) must be visible to the ones that
+/// apply after it. Same derivation as `stage_transformed_entry_projection`.
+fn align_transformed_entry_projection_controller(state: &mut GameState, event: &ProposedEvent) {
+    let Some(entrant) = transformed_entry_entrant(state, event) else {
+        return;
+    };
+    let ProposedEvent::ZoneChange {
+        controller_override,
+        ..
+    } = event
+    else {
+        return;
+    };
+    let Some(entry) = state.liminal_entries.get_mut(&entrant) else {
+        return;
+    };
+    if !matches!(entry.kind, LiminalEntryKind::TransformedEntry) {
+        return;
+    }
+    let crate::types::game_state::LiminalEntrant::Card(projected) = &mut entry.object else {
+        return;
+    };
+    let controller = controller_override.unwrap_or(projected.owner);
+    projected.controller = controller;
+    entry.controller = controller;
+}
+
 fn legacy_object_replacement_candidates(
     state: &GameState,
     event: &ProposedEvent,
@@ -10247,6 +10279,11 @@ fn apply_single_replacement_and_dirty(
             }
         }
     }
+    // CR 614.12 + CR 616.1f: every applied replacement passes here, so this is
+    // where a rewritten entry controller reaches the staged projection.
+    if let Ok(after) = &result {
+        align_transformed_entry_projection_controller(state, after);
+    }
     dirty_replacement_index(state);
     result
 }
@@ -10617,6 +10654,15 @@ fn candidate_materiality(
         // Unknown definition — be conservative.
         return CandidateMateriality::Unconditional;
     };
+    // CR 616.1b + CR 614.12: a self entry-controller override carried on the
+    // definition changes the controller every later-applied entry replacement
+    // reads, so it is order-sensitive like the execute-chain override below.
+    // CR 616.1b requires such an effect to be chosen before the others; the
+    // engine surfaces it through the ordinary ordering prompt instead of
+    // enforcing that order.
+    if repl_def.enters_under.is_some() {
+        return CandidateMateriality::Unconditional;
+    }
     // CR 615 + CR 616.1: A damage prevention shield modifies the damage amount,
     // so it writes the `Damage` field and is order-material against any other
     // `Damage` writer — a doubler (Furnace of Rath `Double`), Torbran (`Plus`),
@@ -11821,7 +11867,11 @@ pub fn continue_replacement(
     // off the battlefield) still hands a
     // resident projection to `stranded_transformed_entry_projection`, so the
     // terminal result below releases it instead of leaving it resident past
-    // this event's delivery.
+    // this event's delivery. The reused projection's controller already follows
+    // the pending event: every applied replacement realigns it in
+    // `apply_single_replacement_and_dirty`, and an entry-controller answer
+    // written onto the pending event is applied through that same seam before
+    // anything reads the projection.
     let pending_event = state
         .pending_replacement
         .as_ref()
