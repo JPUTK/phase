@@ -686,7 +686,7 @@ fn battle_protector_cannot_attack_own_battle() {
 /// decision point after the last defense counter is removed. `graveyard_creature`
 /// seeds a synthetic "Graveyard Bear" 2/2 into P1's graveyard (Lazotep Convert's
 /// copy target). `p1_real_permanents` are added to P1's battlefield
-/// as real cards (Kismet, for the Kismet-vs-copy ordering test). Returns the
+/// as real cards (Kismet, for the Kismet-vs-copy CR 616.1c precedence test). Returns the
 /// runner, the battle's `ObjectId`, and every event after the attack
 /// declaration through the damage action.
 fn defeat_siege_in_combat(
@@ -1201,10 +1201,10 @@ fn siege_victory_cast_offers_back_face_copy_replacement_invasion_of_amonkhet() {
 /// (Kismet) matches the entrant as it will exist on the battlefield (the back
 /// face), and the replacement-choice prompt's candidates come from the
 /// projection's own definitions — never the stored front face's definition at
-/// the same index. Pins the engine's current CR 616.1 prompt shape, which
-/// does not yet model CR 616.1c precedence.
+/// the same index. CR 616.1c: the optional copy replacement is decided before
+/// Kismet's CR 616.1e effect, which applies once the copy is declined.
 #[test]
-fn siege_victory_cast_orders_back_face_copy_against_kismet() {
+fn siege_victory_cast_decides_back_face_copy_before_kismet() {
     let (mut runner, battle, _events) =
         defeat_siege_in_combat("Invasion of Amonkhet", 5, false, true, &["Kismet"]);
 
@@ -1236,82 +1236,58 @@ fn siege_victory_cast_orders_back_face_copy_against_kismet() {
 
     resolve_victory(&mut runner, battle, true);
 
-    let (player, copy_index, protector_present, other_description, candidate_count, kind) =
-        match runner.state().waiting_for.clone() {
-            WaitingFor::ReplacementChoice {
-                player,
-                candidates,
-                candidate_count,
-                kind,
-                ..
-            } => {
-                let copy_index = candidates
-                    .iter()
-                    .position(|c| c.description == copy_description)
-                    .expect("the back face's copy replacement must be a candidate");
-                let protector_present = candidates
-                    .iter()
-                    .any(|c| c.description.starts_with("CR 310.12a"));
-                let other_description = candidates
-                    .iter()
-                    .find(|c| c.description != copy_description)
-                    .map(|c| c.description.clone());
-                (
-                    player,
-                    copy_index,
-                    protector_present,
-                    other_description,
-                    candidate_count,
-                    kind,
-                )
-            }
-            other => panic!("expected the CR 616.1 ordering prompt, got {other:?}"),
-        };
-
+    let WaitingFor::ReplacementChoice {
+        player,
+        candidates,
+        candidate_count,
+        kind,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected the copy's accept/decline, got {:?}",
+            runner.state().waiting_for
+        );
+    };
     assert_eq!(
         player, P0,
         "CR 616.1: the affected object's controller chooses"
     );
-    assert!(
-        !protector_present,
-        "CR 614.12: the front face's suppressed protector replacement must \
-         not be a candidate"
-    );
-    // The engine does not yet apply CR 616.1c precedence (a copy effect must
-    // be chosen before a CR 616.1e effect such as this one), so it currently
-    // offers both as one CR 616.1 ordering choice; this assertion pins that
-    // current shape and must change when the precedence is modelled.
-    assert_eq!(
-        candidate_count, 2,
-        "CR 614.12 (engine's current CR 616.1 prompt shape; CR 616.1c precedence not modelled)"
-    );
     assert_eq!(
         kind,
-        ReplacementChoiceKind::Order,
-        "CR 614.12 (engine's current CR 616.1 prompt shape; CR 616.1c precedence not modelled)"
+        ReplacementChoiceKind::OptionalBranch,
+        "CR 616.1c: only the optional copy replacement is offered"
     );
+    assert_eq!(candidate_count, 2, "accept or decline the copy");
     assert_eq!(
-        other_description,
-        Some("Enters tapped".to_string()),
-        "CR 614.12 (engine's current CR 616.1 prompt shape; CR 616.1c precedence not modelled)"
+        candidates.first().map(|c| c.description.clone()),
+        Some(copy_description.clone())
+    );
+    assert!(
+        !candidates.iter().any(|c| c.description == "Enters tapped"),
+        "CR 616.1c: Kismet's CR 616.1e effect is not offered before the copy is decided"
+    );
+    assert!(
+        !candidates
+            .iter()
+            .any(|c| c.description.starts_with("CR 310.12a")),
+        "CR 614.12: the front face's suppressed protector replacement is not a candidate"
     );
 
-    runner
-        .act(GameAction::ChooseReplacement { index: copy_index })
-        .expect("order the copy first");
-
-    match runner.state().waiting_for.clone() {
+    // An index past the two offered options is rejected and leaves the choice open.
+    assert!(
+        runner
+            .act(GameAction::ChooseReplacement { index: 2 })
+            .is_err(),
+        "no acceptable index names the withheld Kismet effect"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
         WaitingFor::ReplacementChoice {
-            kind, candidates, ..
-        } => {
-            assert_eq!(kind, ReplacementChoiceKind::OptionalBranch);
-            assert_eq!(
-                candidates.first().map(|c| c.description.clone()),
-                Some(copy_description.clone())
-            );
+            kind: ReplacementChoiceKind::OptionalBranch,
+            ..
         }
-        other => panic!("expected the optional copy accept/decline, got {other:?}"),
-    }
+    ));
 
     // Decline the copy — CR 616.1f: Kismet is still applicable and applies.
     runner

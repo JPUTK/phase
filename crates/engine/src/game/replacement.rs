@@ -1574,7 +1574,7 @@ fn replacement_choice_label(repl: &ReplacementDefinition) -> String {
 }
 
 /// CR 616.1 (issue #8485): sentinel-aware definition lookup for the CR 616.1
-/// replacement-choice PROMPT. **Display only.**
+/// replacement-choice PROMPT and for `replacement_precedence` (CR 616.1 steps).
 ///
 /// Mirrors the `rid.source == ObjectId(0)` dispatch that every runtime shield
 /// reader in this file already performs (`shield_kind_for_rid`,
@@ -10654,12 +10654,11 @@ fn candidate_materiality(
         // Unknown definition — be conservative.
         return CandidateMateriality::Unconditional;
     };
-    // CR 616.1b + CR 614.12: a self entry-controller override carried on the
-    // definition changes the controller every later-applied entry replacement
-    // reads, so it is order-sensitive like the execute-chain override below.
-    // CR 616.1b requires such an effect to be chosen before the others; the
-    // engine surfaces it through the ordinary ordering prompt instead of
-    // enforcing that order.
+    // CR 616.1b + CR 614.12: a definition-level entry-controller override rewrites the
+    // `ZoneChange`'s `controller_override`, which every later-applied entry replacement
+    // reads, and another override rewrites it again (last applied wins).
+    // `choosable_replacement_candidates` limits its competitors to other CR 616.1b
+    // candidates, so this arm decides that two such overrides are offered as a choice.
     if repl_def.enters_under.is_some() {
         return CandidateMateriality::Unconditional;
     }
@@ -11048,6 +11047,90 @@ fn park_entry_controller_choice(
     ReplacementResult::NeedsChoice(player)
 }
 
+/// CR 616.1a-e: the step of the CR 616.1 procedure at which an applicable
+/// replacement/prevention candidate may be chosen. Declared in CR order, so the
+/// derived `Ord` ranks the step that must be chosen from first as the least.
+///
+/// CR 616.1a (self-replacement effects, CR 614.15) has no variant: the parser folds
+/// each one into its own ability (`AbilityCondition::ConditionInstead`, see
+/// `parser/oracle.rs::apply_self_replacement_override`), so it is applied while that
+/// ability resolves, before the event it modifies is proposed. CR 616.1d (a card
+/// entering with its back face up) has no variant: no applier writes
+/// `ProposedEvent::ZoneChange::enter_transformed`, which is fixed when the event is
+/// built. A recognizer for either belongs here if that ever changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ReplacementPrecedence {
+    /// CR 616.1b: modifies under whose control an object enters the battlefield.
+    EntryController,
+    /// CR 616.1c: causes an object to become a copy of another object as it enters.
+    EntryCopy,
+    /// CR 616.1e: any other applicable effect.
+    Unrestricted,
+}
+
+/// CR 616.1b + CR 616.1c: the CR 616.1 step `rid` belongs to for `proposed`. Reads
+/// exactly what the appliers write: `enters_under` onto a battlefield `ZoneChange`
+/// (`apply_single_replacement`), `token_owner_redirect` onto a `CreateToken`
+/// (`create_token_applier`; CR 111.2), and an `execute` whose work is `BecomeCopy`.
+fn replacement_precedence(
+    state: &GameState,
+    rid: ReplacementId,
+    proposed: &ProposedEvent,
+) -> ReplacementPrecedence {
+    // Virtual candidates (commander return, finality, shield/umbra, granted keywords,
+    // dredge, combat skip) carry no definition and write neither controller nor copy.
+    let Some(def) = replacement_choice_definition(state, rid) else {
+        return ReplacementPrecedence::Unrestricted;
+    };
+    let rewrites_entry_controller = match proposed {
+        ProposedEvent::ZoneChange {
+            to: Zone::Battlefield,
+            ..
+        } => def.enters_under.is_some(),
+        ProposedEvent::CreateToken { .. } => def.token_owner_redirect.is_some(),
+        _ => false,
+    };
+    if rewrites_entry_controller {
+        return ReplacementPrecedence::EntryController;
+    }
+    // CR 111.1: a created or entering token enters the battlefield too.
+    let enters_battlefield = matches!(
+        proposed,
+        ProposedEvent::ZoneChange {
+            to: Zone::Battlefield,
+            ..
+        } | ProposedEvent::CreateToken { .. }
+            | ProposedEvent::TokenEntry { .. }
+    );
+    if enters_battlefield && def.execute.as_deref().is_some_and(ability_becomes_copy) {
+        return ReplacementPrecedence::EntryCopy;
+    }
+    ReplacementPrecedence::Unrestricted
+}
+
+/// CR 616.1 + CR 616.1f: the candidates the affected player may choose among now:
+/// every candidate of the earliest CR 616.1 step present (all of them when none is
+/// restricted). The single authority for CR 616.1 precedence: `pipeline_loop` parks and
+/// applies only this subset, so a `ChooseReplacement` index can never name a withheld
+/// candidate; withheld candidates are rediscovered on the next pass.
+fn choosable_replacement_candidates(
+    state: &GameState,
+    proposed: &ProposedEvent,
+    candidates: Vec<ReplacementId>,
+) -> Vec<ReplacementId> {
+    let tiered: Vec<(ReplacementId, ReplacementPrecedence)> = candidates
+        .into_iter()
+        .map(|rid| (rid, replacement_precedence(state, rid, proposed)))
+        .collect();
+    let Some(first) = tiered.iter().map(|(_, tier)| *tier).min() else {
+        return Vec::new();
+    };
+    tiered
+        .into_iter()
+        .filter_map(|(rid, tier)| (tier == first).then_some(rid))
+        .collect()
+}
+
 fn pipeline_loop(
     state: &mut GameState,
     mut proposed: ProposedEvent,
@@ -11081,6 +11164,10 @@ fn pipeline_loop(
         {
             return ReplacementResult::Prevented;
         }
+
+        // CR 616.1a-e: only the earliest CR 616.1 step present may be chosen now;
+        // the rest are rediscovered once the chosen effect applies (CR 616.1f).
+        let candidates = choosable_replacement_candidates(state, &proposed, candidates);
 
         if candidates.len() == 1 {
             let rid = candidates[0];
@@ -17593,6 +17680,150 @@ mod tests {
             controller: owner_controller,
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         }
+    }
+
+    /// CR 616.1b + CR 616.1c + CR 616.1e: of the applicable candidates only the earliest
+    /// CR 616.1 step present is choosable, off-entry events are unrestricted, and a
+    /// floating (`ObjectId(0)`) token-controller redirect is tiered (CR 111.2).
+    #[test]
+    fn replacement_precedence_restricts_choosable_candidates_to_earliest_cr_616_1_step() {
+        use crate::types::ability::{CopyRecipient, QuantityModification};
+
+        let entry_moved = || {
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .valid_card(TargetFilter::SelfRef)
+                .destination_zone(Zone::Battlefield)
+        };
+        let copy_effect = Effect::BecomeCopy {
+            target: TargetFilter::Any,
+            recipient: CopyRecipient::Source,
+            duration: None,
+            mana_value_limit: None,
+            additional_modifications: Vec::new(),
+        };
+        let defs = vec![
+            entry_moved().execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                },
+            )),
+            entry_moved().enters_under(ControllerRef::Opponent),
+            entry_moved().execute(AbilityDefinition::new(AbilityKind::Spell, copy_effect)),
+            entry_moved().enters_under(ControllerRef::You),
+        ];
+        let mut state = test_state_with_object(ObjectId(10), Zone::Hand, defs);
+        let mut doubler = GameObject::new(
+            ObjectId(11),
+            CardId(2),
+            PlayerId(0),
+            "Doubler".to_string(),
+            Zone::Battlefield,
+        );
+        doubler.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                .quantity_modification(QuantityModification::DOUBLE)]
+            .into();
+        state.objects.insert(ObjectId(11), doubler);
+        state.battlefield.push_back(ObjectId(11));
+        state.pending_damage_replacements.push(
+            ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                .token_owner_scope(ControllerRef::Opponent)
+                .token_owner_redirect(ControllerRef::You),
+        );
+
+        let on_object = |index: usize| ReplacementId {
+            source: ObjectId(10),
+            index,
+        };
+        let floating_redirect = ReplacementId {
+            source: ObjectId(0),
+            index: 0,
+        };
+        let doubler_rid = ReplacementId {
+            source: ObjectId(11),
+            index: 0,
+        };
+        let entry = ProposedEvent::zone_change(ObjectId(10), Zone::Hand, Zone::Battlefield, None);
+        let dies =
+            ProposedEvent::zone_change(ObjectId(10), Zone::Battlefield, Zone::Graveyard, None);
+        let token = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(test_token_spec(PlayerId(0), CoreType::Creature)),
+            copy: None,
+            enter_tapped: EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+        };
+
+        // Each tier is recognized from what the appliers write.
+        assert_eq!(
+            replacement_precedence(&state, on_object(0), &entry),
+            ReplacementPrecedence::Unrestricted
+        );
+        assert_eq!(
+            replacement_precedence(&state, on_object(1), &entry),
+            ReplacementPrecedence::EntryController
+        );
+        assert_eq!(
+            replacement_precedence(&state, on_object(2), &entry),
+            ReplacementPrecedence::EntryCopy
+        );
+        assert_eq!(
+            replacement_precedence(&state, floating_redirect, &token),
+            ReplacementPrecedence::EntryController
+        );
+        assert_eq!(
+            replacement_precedence(&state, doubler_rid, &token),
+            ReplacementPrecedence::Unrestricted
+        );
+
+        let choosable = |event: &ProposedEvent, candidates: Vec<ReplacementId>| {
+            choosable_replacement_candidates(&state, event, candidates)
+        };
+        assert_eq!(
+            choosable(&entry, vec![on_object(0), on_object(1), on_object(2)]),
+            vec![on_object(1)],
+            "CR 616.1b: the controller override is chosen before the copy and the tap"
+        );
+        assert_eq!(
+            choosable(&entry, vec![on_object(0), on_object(2)]),
+            vec![on_object(2)],
+            "CR 616.1c: the copy is chosen before an unrestricted effect"
+        );
+        assert_eq!(
+            choosable(
+                &entry,
+                vec![on_object(0), on_object(1), on_object(2), on_object(3)]
+            ),
+            vec![on_object(1), on_object(3)],
+            "CR 616.1b: equally eligible candidates all remain choosable, in order"
+        );
+        assert_eq!(
+            choosable(
+                &entry,
+                vec![
+                    on_object(0),
+                    commander_hand_or_library_return_replacement_id(ObjectId(10)),
+                ]
+            )
+            .len(),
+            2,
+            "CR 616.1e: a virtual candidate carries no definition and is unrestricted"
+        );
+        assert_eq!(
+            choosable(&dies, vec![on_object(0), on_object(1), on_object(2)]),
+            vec![on_object(0), on_object(1), on_object(2)],
+            "an event that is not a battlefield entry restricts nothing"
+        );
+        assert_eq!(
+            choosable(&token, vec![doubler_rid, floating_redirect]),
+            vec![floating_redirect],
+            "CR 616.1b + CR 111.2: the token-controller redirect precedes the doubler"
+        );
+        assert!(choosable(&entry, Vec::new()).is_empty());
     }
 
     #[test]
