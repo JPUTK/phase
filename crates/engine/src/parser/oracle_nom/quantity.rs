@@ -8556,7 +8556,7 @@ mod tests {
         }
     }
 
-    /// CR 208.4b + CR 109.4: a base-P/T designation in the controller-scoped
+    /// CR 208.4b + CR 109.4 + CR 109.5: a base-P/T designation in the controller-scoped
     /// for-each population contributes both exact base-scope props (Duskana,
     /// the Rage Mother: "for each creature you control with base power and
     /// toughness 2/2").
