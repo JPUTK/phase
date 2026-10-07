@@ -4753,7 +4753,7 @@ fn prepare_incremental_flush(
     }
     crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
 
-    let active_effects = collect_derivation_continuous_effects(state);
+    let active_effects = collect_layer_pass_active_continuous_effects(state);
     if active_effects.iter().any(|effect| {
         recipient_ids.contains(&effect.source_id)
             && !effect_is_restricted_to_incremental_recipients(effect, &recipient_ids)
@@ -4822,13 +4822,14 @@ fn prepare_incremental_flush(
         return None;
     }
 
-    // CR 613.6: A restricted pass cannot decide whether an outside-slice
-    // carrier received its original static grant. Re-derive both populations
-    // together when any part of that inner static can reach an entrant.
+    // CR 613.6: a restricted pass cannot decide whether an outside-slice
+    // carrier is in its grant's affected set, and that carrier still holds last
+    // pass's installed copy of the granted static; re-derive the whole board
+    // when any granted-static child of such a carrier can reach an entrant.
     if active_effects.iter().any(|effect| {
         !recipient_ids.contains(&effect.source_id)
             && effect_can_reach_incremental_recipients(effect, &recipient_ids)
-            && referenced_granted_static_parent(state, effect).is_some()
+            && granted_static_child_origin(effect).is_some()
     }) {
         return None;
     }
@@ -4935,7 +4936,9 @@ struct LiveCharacteristicReads {
 /// channel can see each one. One row per construction site — the eight
 /// `ActiveContinuousEffect { .. }` literals in the engine, six here and two in
 /// `stickers.rs`, all reached through
-/// [`collect_shared_active_continuous_effects`]:
+/// [`collect_shared_active_continuous_effects`] (layer passes also enter the
+/// [`expand_granted_static_effects`] row through
+/// [`append_late_granted_static_effects`]):
 ///
 /// | producer | `condition` it writes | seen by |
 /// |---|---|---|
@@ -6245,11 +6248,11 @@ fn apply_layers_incremental(
         // gather. If a sticker grants a continuous static ability, refresh the
         // generator index so the recipient can source that effect in this pass.
         crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
-        collect_derivation_continuous_effects(state)
+        collect_layer_pass_active_continuous_effects(state)
     } else if copy_effects.is_empty() {
         active_effects
     } else {
-        collect_derivation_continuous_effects(state)
+        collect_layer_pass_active_continuous_effects(state)
     };
 
     // Step 3-4: Remaining layers in order, restricted to recipient objects.
@@ -6468,7 +6471,7 @@ fn apply_pt_counter_modifications(state: &mut GameState, ids: impl IntoIterator<
 fn gather_active_continuous_effects(
     state: &GameState,
 ) -> Vec<(Layer, Vec<ActiveContinuousEffect>)> {
-    bucket_effects_by_layer(collect_derivation_continuous_effects(state))
+    bucket_effects_by_layer(collect_layer_pass_active_continuous_effects(state))
 }
 
 fn bucket_effects_by_layer(
@@ -6869,8 +6872,8 @@ fn active_continuous_effects_from_static_definitions(
                         modification_index: mod_index,
                     });
             // CR 113.3d + CR 604.1 + CR 611.2c: A `GrantStaticAbility` modification
-            // installs the inner static onto every recipient matching the host's
-            // `affected_filter`. The recipient is the granted-static's *source*
+            // installs the inner static onto every recipient in the host's live
+            // affected set. The recipient is the granted-static's *source*
             // for the purposes of resolving `ControllerRef::You` and per-recipient
             // condition gating — the inner static functions exactly as if it
             // were printed on the recipient (CR 604.1). We synthesize the inner
@@ -6880,14 +6883,25 @@ fn active_continuous_effects_from_static_definitions(
             // gather-time expansion, the layer-6 push onto `obj.static_definitions`
             // would not appear in `effects_by_layer` (which is captured before
             // layer 6 applies) and the inner static would be inert for a full pass.
+            // Gather time sees only the objects that match after layer 1; layer
+            // passes add the later candidates through
+            // `append_late_granted_static_effects`, and application gates every
+            // child through `granted_static_parent_qualifies`.
             if let ContinuousModification::GrantStaticAbility { definition: inner } = modification {
                 effects.extend(expand_granted_static_effects(
                     state,
-                    source_id,
                     timestamp,
-                    &affected_filter,
                     inner.as_ref(),
                     trigger_producer_origin.clone(),
+                    state
+                        .battlefield
+                        .iter()
+                        .copied()
+                        .filter(granted_static_host_matches(
+                            state,
+                            source_id,
+                            &affected_filter,
+                        )),
                 ));
                 // Continue: also push the meta-effect below so layer-6 apply
                 // pushes the inner static onto the recipient's
@@ -6921,13 +6935,20 @@ fn active_continuous_effects_from_static_definitions(
 }
 
 /// CR 113.3d + CR 604.1 + CR 611.2c: Expand a `GrantStaticAbility` into one
-/// `ActiveContinuousEffect` per inner modification per recipient matching the
-/// host's `host_affected_filter`. Each recipient becomes the synthesized
+/// `ActiveContinuousEffect` per inner modification per candidate recipient.
+/// Each recipient becomes the synthesized
 /// effect's `source_id` so `ControllerRef::You` and any other source-relative
 /// references in `inner.affected` resolve against the recipient — which is the
 /// semantic the CR requires for a granted ability ("its controller is the
 /// controller of the object that gained the ability"). The synthesized effects
 /// carry the inner static's own `condition`, `mode`, and CDA flag.
+///
+/// Candidates come from two places. Gather-time expansion passes the objects
+/// that match the host's affected filter after layer 1;
+/// `append_late_granted_static_effects` adds the remainder for layer passes
+/// whose host filter reads a layer-writable characteristic. Neither decides
+/// existence: `granted_static_parent_qualifies` gates every child at
+/// application against its exact parent's live affected set.
 ///
 /// Single-pass limitation: if `inner.modifications` itself contains another
 /// `GrantStaticAbility`, this function does not recursively expand it within
@@ -6947,27 +6968,17 @@ fn active_continuous_effects_from_static_definitions(
 /// recipient; documented here for the next maintainer who hits that case.
 fn expand_granted_static_effects(
     state: &GameState,
-    host_source_id: ObjectId,
     host_timestamp: u64,
-    host_affected_filter: &TargetFilter,
     inner: &StaticDefinition,
     host_origin: Option<TriggerProducerOrigin>,
+    recipients: impl IntoIterator<Item = ObjectId>,
 ) -> Vec<ActiveContinuousEffect> {
     if inner.mode != StaticMode::Continuous {
         return Vec::new();
     }
     let inner_affected = inner.affected.clone().unwrap_or(TargetFilter::Any);
-    let ctx = crate::game::filter::FilterContext::from_source(state, host_source_id);
     let mut out = Vec::new();
-    for &recipient_id in &state.battlefield {
-        if !crate::game::filter::matches_target_filter(
-            state,
-            recipient_id,
-            host_affected_filter,
-            &ctx,
-        ) {
-            continue;
-        }
+    for recipient_id in recipients {
         let (recipient_controller, recipient_timestamp) = match state.objects.get(&recipient_id) {
             Some(obj) => (obj.controller, obj.timestamp),
             None => continue,
@@ -7020,6 +7031,55 @@ fn expand_granted_static_effects(
         }
     }
     out
+}
+
+/// Whether an object matches a granting host's affected filter, from the host's
+/// point of view. Builds the filter context once for every candidate.
+fn granted_static_host_matches<'a>(
+    state: &'a GameState,
+    host_source_id: ObjectId,
+    host_affected_filter: &'a TargetFilter,
+) -> impl Fn(&ObjectId) -> bool + 'a {
+    let ctx = FilterContext::from_source(state, host_source_id);
+    move |&id| matches_target_filter(state, id, host_affected_filter, &ctx)
+}
+
+/// CR 611.3a + CR 613.1: a carrier can enter the grant's affected set through
+/// any layer-written characteristic its filter reads (including CR 718.3b
+/// prototype values rewritten after layer 4); a filter that reads none fixes
+/// membership after layer 1.
+fn append_late_granted_static_effects(
+    state: &GameState,
+    effects: &mut Vec<ActiveContinuousEffect>,
+) {
+    let late: Vec<ActiveContinuousEffect> = effects
+        .iter()
+        .filter_map(|parent| {
+            let inner = granted_static_definition(parent)?;
+            (!target_filter_characteristic_reads(&parent.affected_filter).is_empty())
+                .then_some((parent, inner))
+        })
+        .flat_map(|(parent, inner)| {
+            let matches =
+                granted_static_host_matches(state, parent.source_id, &parent.affected_filter);
+            expand_granted_static_effects(
+                state,
+                parent.timestamp,
+                inner,
+                parent.trigger_producer_origin.clone(),
+                state.battlefield.iter().copied().filter(|id| !matches(id)),
+            )
+        })
+        .collect();
+    effects.extend(late);
+}
+
+/// CR 613.1: the effect set a layer pass applies — the derivation collection
+/// plus the late granted-static candidates only a layer pass can gate.
+fn collect_layer_pass_active_continuous_effects(state: &GameState) -> Vec<ActiveContinuousEffect> {
+    let mut effects = collect_derivation_continuous_effects(state);
+    append_late_granted_static_effects(state, &mut effects);
+    effects
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -7395,14 +7455,21 @@ fn gather_transient_continuous_effects_with(
             if let ContinuousModification::GrantStaticAbility { definition: inner } = modification {
                 effects.extend(expand_granted_static_effects(
                     state,
-                    tce.source_id,
                     tce.timestamp,
-                    &tce.affected,
                     inner.as_ref(),
                     Some(TriggerProducerOrigin::Transient {
                         continuous_effect_id: tce.id,
                         modification_index: mod_index,
                     }),
+                    state
+                        .battlefield
+                        .iter()
+                        .copied()
+                        .filter(granted_static_host_matches(
+                            state,
+                            tce.source_id,
+                            &tce.affected,
+                        )),
                 ));
             }
             effects.push(ActiveContinuousEffect {
@@ -8555,6 +8622,26 @@ pub(crate) fn order_active_continuous_effects(
     }
 }
 
+/// CR 613.8a: a granted static's effect exists only once its grant applies, so
+/// a child depends on its parent. The reverse edge is suppressed: the
+/// shape-based relation would otherwise make a parent whose affected filter
+/// reads abilities depend on its own ability-writing children, a CR 613.8b loop
+/// that falls back to timestamp order (the whole bucket in
+/// `order_with_dependencies`, the loop's members in
+/// `apply_ability_effects_with_referenced_grants`). A child's CR 613.7a
+/// timestamp can equal its parent's, and the tie is broken by source id, so
+/// timestamp order alone does not put the parent first.
+fn granted_static_dependency(
+    a: &ActiveContinuousEffect,
+    b: &ActiveContinuousEffect,
+) -> Option<bool> {
+    if is_granted_static_child_of(a, b) {
+        // CR 613.8a(c): only effects of the same CDA class can depend on each other.
+        return Some(a.characteristic_defining == b.characteristic_defining);
+    }
+    is_granted_static_child_of(b, a).then_some(false)
+}
+
 /// Check if effect `a` depends on effect `b`.
 /// If `b` changes types and `a`'s filter is type-based, `a` depends on `b`.
 ///
@@ -8580,6 +8667,9 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
     if a.source_id == b.source_id && a.def_index == b.def_index && a.transient_id == b.transient_id
     {
         return false;
+    }
+    if let Some(dependent) = granted_static_dependency(a, b) {
+        return dependent;
     }
     if a.characteristic_defining != b.characteristic_defining {
         return false;
@@ -9078,19 +9168,72 @@ fn continuous_effect_group_key(
     })
 }
 
-/// Find the exact functioning grant that produced a synthesized static. The
-/// collector remains the authority for source zone, duration, and occurrence.
-fn original_granted_static_parent(
-    state: &GameState,
-    effect: &ActiveContinuousEffect,
-) -> Option<ActiveContinuousEffect> {
+/// The inner static of a granting effect: a printed or transient
+/// `GrantStaticAbility` (CR 613.1f), never a synthesized child.
+fn granted_static_definition(effect: &ActiveContinuousEffect) -> Option<&StaticDefinition> {
+    if effect.def_index.is_none() && effect.transient_id.is_none() {
+        return None;
+    }
+    match &effect.modification {
+        ContinuousModification::GrantStaticAbility { definition } => Some(definition.as_ref()),
+        _ => None,
+    }
+}
+
+/// The exact grant occurrence a synthesized granted-static effect came from.
+/// Printed, transient and expanded-trigger effects are not granted-static
+/// children.
+fn granted_static_child_origin(effect: &ActiveContinuousEffect) -> Option<&TriggerProducerOrigin> {
     if effect.def_index.is_some()
         || effect.transient_id.is_some()
         || effect.expanded_trigger_provider.is_some()
     {
         return None;
     }
-    let origin = effect.trigger_producer_origin.as_ref()?;
+    effect.trigger_producer_origin.as_ref()
+}
+
+fn is_granted_static_child_of(
+    child: &ActiveContinuousEffect,
+    parent: &ActiveContinuousEffect,
+) -> bool {
+    granted_static_definition(parent).is_some()
+        && granted_static_child_origin(child)
+            .is_some_and(|origin| parent.trigger_producer_origin.as_ref() == Some(origin))
+}
+
+/// The started-set key of a child's parent grant. Within one pass this equals
+/// `continuous_effect_group_key` of that parent, because an object's
+/// incarnation cannot change mid-pass; a different incarnation finds no
+/// started set.
+fn granted_static_parent_group_key(origin: &TriggerProducerOrigin) -> ContinuousEffectGroupKey {
+    match origin {
+        TriggerProducerOrigin::Static {
+            source,
+            definition_index,
+            ..
+        } => ContinuousEffectGroupKey::Static {
+            source: *source,
+            definition_index: *definition_index,
+        },
+        TriggerProducerOrigin::Transient {
+            continuous_effect_id,
+            ..
+        } => ContinuousEffectGroupKey::Transient {
+            continuous_effect_id: *continuous_effect_id,
+        },
+    }
+}
+
+/// Find the exact functioning grant that produced a synthesized static. The
+/// collector remains the authority for source zone, duration, and occurrence.
+/// CR 611.2b + CR 613.1: look the parent up under the same derivation gates
+/// that admitted the child.
+fn original_granted_static_parent(
+    state: &GameState,
+    effect: &ActiveContinuousEffect,
+) -> Option<ActiveContinuousEffect> {
+    let origin = granted_static_child_origin(effect)?;
     let parents = match origin {
         TriggerProducerOrigin::Static { source, .. } => {
             let object = state.objects.get(&source.object_id)?;
@@ -9101,18 +9244,17 @@ fn original_granted_static_parent(
         }
         TriggerProducerOrigin::Transient { .. } => {
             let mut effects = Vec::new();
-            gather_transient_continuous_effects(state, &mut effects);
+            gather_transient_continuous_effects_with(
+                state,
+                &mut effects,
+                transient_effect_passes_other_gates,
+            );
             effects
         }
     };
-    parents.into_iter().find(|parent| {
-        parent.trigger_producer_origin.as_ref() == Some(origin)
-            && matches!(
-                &parent.modification,
-                ContinuousModification::GrantStaticAbility { .. }
-            )
-            && (parent.def_index.is_some() || parent.transient_id.is_some())
-    })
+    parents
+        .into_iter()
+        .find(|parent| is_granted_static_child_of(effect, parent))
 }
 
 fn referenced_granted_static_parent(
@@ -9136,39 +9278,28 @@ fn is_referenced_grant_modification(modification: &ContinuousModification) -> bo
     )
 }
 
-/// CR 613.6: A granted static can retain its affected set only after its
-/// original grant qualified the carrier. The inner affected population is
-/// independent and is scanned by the ordinary application below.
-fn referenced_granted_static_parent_qualifies(
+/// CR 613.6 + CR 613.8a: a granted static's effect exists for a carrier only
+/// once its exact original grant applies to that carrier; a started grant
+/// (including one started by an earlier part of the same definition) keeps its
+/// set. The inner affected population is independent and is scanned by the
+/// ordinary application below.
+fn granted_static_parent_qualifies(
     state: &GameState,
     effect: &ActiveContinuousEffect,
     restrict_to: Option<&BTreeSet<ObjectId>>,
     abilities_suppressed: &HashSet<ObjectId>,
     started_effect_sets: &StartedContinuousEffectSets,
 ) -> bool {
-    if effect.def_index.is_some()
-        || effect.transient_id.is_some()
-        || effect.expanded_trigger_provider.is_some()
-        || effect.trigger_producer_origin.is_none()
-    {
+    let Some(origin) = granted_static_child_origin(effect) else {
         return true;
+    };
+    let parent_key = granted_static_parent_group_key(origin);
+    if let Some(affected) = started_effect_sets.get(&parent_key) {
+        return affected.contains(&effect.source_id);
     }
     let Some(parent) = original_granted_static_parent(state, effect) else {
         return false;
     };
-    if !matches!(
-        &parent.modification,
-        ContinuousModification::GrantStaticAbility { definition }
-            if definition.modifications.iter().any(is_referenced_grant_modification)
-    ) {
-        return true;
-    }
-    let Some(parent_key) = continuous_effect_group_key(state, &parent) else {
-        return false;
-    };
-    if let Some(affected) = started_effect_sets.get(&parent_key) {
-        return affected.contains(&effect.source_id);
-    }
     let mut scratch = state.clone();
     let mut scratch_suppressed = abilities_suppressed.clone();
     let mut scratch_started = started_effect_sets.clone();
@@ -9384,21 +9515,6 @@ fn apply_continuous_effect_filtered(
         .and_then(|key| started_effect_sets.get(key));
     let retained_affected_set_was_present = retained_affected_ids.is_some();
 
-    // CR 613.6: Qualify the carrier through its exact original grant before
-    // any part of an inner referenced-provider static can start its own set.
-    // A legitimately started inner group keeps that set in later layers.
-    if retained_affected_ids.is_none()
-        && !referenced_granted_static_parent_qualifies(
-            state,
-            effect,
-            restrict_to,
-            abilities_suppressed,
-            started_effect_sets,
-        )
-    {
-        return None;
-    }
-
     // CR 613.1f: A printed static on an object that lost all abilities this
     // pass must not re-apply in later layers (Death's Shadow CDA after
     // Abigale — issue #1321).
@@ -9407,6 +9523,20 @@ fn apply_continuous_effect_filtered(
     // ability that generated it during an intervening layer.
     if retained_affected_ids.is_none()
         && unstarted_effect_generator_is_suppressed(effect, abilities_suppressed)
+    {
+        return None;
+    }
+
+    // CR 613.6: qualify every granted-static carrier through its exact
+    // original grant before any inner part starts its own set.
+    if retained_affected_ids.is_none()
+        && !granted_static_parent_qualifies(
+            state,
+            effect,
+            restrict_to,
+            abilities_suppressed,
+            started_effect_sets,
+        )
     {
         return None;
     }
@@ -10940,6 +11070,7 @@ mod tests {
         );
     }
     use super::*;
+    use crate::game::effects::attach::attach_to;
     use crate::game::elimination::eliminate_player;
     use crate::game::scenario::{GameScenario, P0, P1};
     use crate::game::scenario_db::GameScenarioDbExt;
@@ -10947,15 +11078,16 @@ mod tests {
         move_object, EntryMods, ExileLinkSpec, ZoneChangeCause, ZoneMoveRequest,
     };
     use crate::game::zones::create_object;
+    use crate::parser::oracle::parse_oracle_text;
     use crate::parser::oracle_nom::condition::parse_inner_condition;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, BasicLandType,
-        CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, ChosenSubtypeKind,
-        CommanderOwnership, Comparator, ContinuousModification, ControllerRef, CountScope,
-        DamageChannel, DamageKindFilter, Duration, Effect, FilterProp, ManaProduction, ObjectScope,
-        PlayerFilter, PlayerRelation, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-        SacrificeCost, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition,
-        TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+        CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, ChosenAttribute,
+        ChosenSubtypeKind, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
+        CountScope, DamageChannel, DamageKindFilter, Duration, Effect, FilterProp, ManaProduction,
+        ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PtStat, PtValueScope, QuantityExpr,
+        QuantityRef, SacrificeCost, StaticCondition, StaticDefinition, TargetFilter,
+        TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::{CounterMatch, CounterType};
@@ -18447,6 +18579,408 @@ mod tests {
         );
     }
 
+    /// CR 613.1f + CR 205.3m + CR 108.3: Thranduil, the Elvenking (#7891) —
+    /// "Thranduil has all activated abilities of all Elf cards in your
+    /// graveyard." Built end-to-end through the real parser (`parse_oracle_text`
+    /// → `GrantAllActivatedAbilitiesOf { Typed(Subtype Elf, [Owned You,
+    /// InZone Graveyard]) }`) and the real `evaluate_layers` expansion.
+    ///
+    /// Discriminating along every axis of the source set:
+    ///   - subtype: an Elf card in your graveyard donates its ability, a non-Elf
+    ///     creature card there does not;
+    ///   - owner: an Elf card in the OPPONENT's graveyard does not donate, even
+    ///     with its `controller` field pointed at Thranduil's controller
+    ///     (CR 108.3 — graveyard membership is by ownership);
+    ///   - zone: an Elf creature you control on the battlefield does not donate.
+    ///
+    /// Reverting the composed graveyard arm in `grant_source_noun_phrase` makes
+    /// the clause parse to no static, flipping the static-count and positive
+    /// grant assertions.
+    #[test]
+    fn thranduil_gains_activated_abilities_of_elf_cards_in_your_graveyard() {
+        let mut state = setup();
+
+        let thranduil = make_creature(&mut state, "Thranduil, the Elvenking", 5, 6, PlayerId(0));
+        let parsed = parse_oracle_text(
+            "Thranduil has all activated abilities of all Elf cards in your graveyard.\nWhenever another legendary Elf you control enters, draw two cards, then discard a card.",
+            "Thranduil, the Elvenking",
+            &[],
+            &["Creature".into()],
+            &["Elf".into(), "Noble".into()],
+        );
+        assert_eq!(
+            parsed.statics.len(),
+            1,
+            "Thranduil's grant parses to exactly one static; got {:?}",
+            parsed.statics
+        );
+        assert!(matches!(
+            parsed.statics[0].modifications.as_slice(),
+            [ContinuousModification::GrantAllActivatedAbilitiesOf { .. }]
+        ));
+        {
+            let obj = state.objects.get_mut(&thranduil).unwrap();
+            obj.card_types.subtypes.push("Elf".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions = parsed.statics.clone().into();
+        }
+
+        // Each provider gets a distinct {T}: gain N life ability so the
+        // assertions identify exactly which provider donated.
+        let gain = |n: i32| {
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: n },
+                    player: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Tap)
+        };
+        let graveyard_card = |state: &mut GameState,
+                              owner: PlayerId,
+                              name: &str,
+                              subtype: Option<&str>,
+                              ability: &AbilityDefinition| {
+            let id = create_object(state, CardId(0), owner, name.to_string(), Zone::Graveyard);
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            if let Some(subtype) = subtype {
+                obj.card_types.subtypes.push(subtype.to_string());
+            }
+            obj.base_card_types = obj.card_types.clone();
+            // Printed ability: on the base too, so a layer reset to
+            // `base_abilities` cannot make a negative assertion vacuous.
+            Arc::make_mut(&mut obj.base_abilities).push(ability.clone());
+            obj.abilities = Arc::clone(&obj.base_abilities);
+            id
+        };
+
+        // Elf card in YOUR graveyard — donates.
+        let elf_ability = gain(2);
+        graveyard_card(
+            &mut state,
+            PlayerId(0),
+            "Dead Elf",
+            Some("Elf"),
+            &elf_ability,
+        );
+
+        // Non-Elf creature card in your graveyard — excluded by the subtype.
+        let bear_ability = gain(3);
+        graveyard_card(&mut state, PlayerId(0), "Dead Bear", None, &bear_ability);
+
+        // Elf card in the OPPONENT's graveyard, controller field diverged to
+        // player 0 — excluded by `Owned { You }`.
+        let opp_elf_ability = gain(5);
+        let opp_elf = graveyard_card(
+            &mut state,
+            PlayerId(1),
+            "Opp Dead Elf",
+            Some("Elf"),
+            &opp_elf_ability,
+        );
+        state.objects.get_mut(&opp_elf).unwrap().controller = PlayerId(0);
+
+        // Elf creature you control on the battlefield — excluded by the zone.
+        let live_elf_ability = gain(7);
+        let live_elf = make_creature(&mut state, "Live Elf", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&live_elf).unwrap();
+            obj.card_types.subtypes.push("Elf".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            Arc::make_mut(&mut obj.base_abilities).push(live_elf_ability.clone());
+            obj.abilities = Arc::clone(&obj.base_abilities);
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let abilities = &state.objects.get(&thranduil).unwrap().abilities;
+        assert!(
+            abilities.iter().any(|a| a == &elf_ability),
+            "Thranduil must gain the activated ability of the Elf card in its \
+             controller's graveyard; got {abilities:?}"
+        );
+        assert!(
+            !abilities.iter().any(|a| a == &bear_ability),
+            "a non-Elf graveyard card must not donate (subtype axis)"
+        );
+        assert!(
+            !abilities.iter().any(|a| a == &opp_elf_ability),
+            "an Elf card in the opponent's graveyard must not donate (CR 108.3 owner axis)"
+        );
+        assert!(
+            !abilities.iter().any(|a| a == &live_elf_ability),
+            "an Elf on the battlefield must not donate (graveyard zone axis)"
+        );
+    }
+
+    /// Thranduil (parsed from its real Oracle text) with one graveyard creature
+    /// card of `printed_subtype` carrying a distinct activated ability, plus a
+    /// type-changing permanent parsed from `changer_oracle`. Returns
+    /// `(state, thranduil, graveyard_card, donated_ability)`.
+    fn thranduil_with_type_changed_graveyard_card(
+        changer_name: &str,
+        changer_oracle: &str,
+        changer_core_type: &str,
+        changer_chosen_type: Option<&str>,
+        printed_subtype: &str,
+    ) -> (GameState, ObjectId, ObjectId, AbilityDefinition) {
+        let mut state = setup();
+        state.all_creature_types = vec!["Elf".to_string(), "Goblin".to_string()];
+
+        let thranduil = make_creature(&mut state, "Thranduil, the Elvenking", 5, 6, PlayerId(0));
+        let parsed = parse_oracle_text(
+            "Thranduil has all activated abilities of all Elf cards in your graveyard.\nWhenever another legendary Elf you control enters, draw two cards, then discard a card.",
+            "Thranduil, the Elvenking",
+            &[],
+            &["Creature".into()],
+            &["Elf".into(), "Noble".into()],
+        );
+        assert_eq!(parsed.statics.len(), 1, "got {:?}", parsed.statics);
+        assert!(matches!(
+            parsed.statics[0].modifications.as_slice(),
+            [ContinuousModification::GrantAllActivatedAbilitiesOf { .. }]
+        ));
+        {
+            let obj = state.objects.get_mut(&thranduil).unwrap();
+            obj.card_types.subtypes.push("Elf".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions = parsed.statics.clone().into();
+            obj.base_static_definitions = Arc::new(parsed.statics.clone());
+        }
+
+        // The type-changing permanent, built from its real Oracle text.
+        let changer = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            changer_name.to_string(),
+            Zone::Battlefield,
+        );
+        let changer_parsed = parse_oracle_text(
+            changer_oracle,
+            changer_name,
+            &[],
+            &[changer_core_type.to_string()],
+            &[],
+        );
+        assert_eq!(
+            changer_parsed.statics.len(),
+            1,
+            "{changer_name} must parse to exactly one static; got {:?}",
+            changer_parsed.statics
+        );
+        let changer_modifications = &changer_parsed.statics[0].modifications;
+        if changer_chosen_type.is_some() {
+            assert!(
+                changer_modifications.contains(&ContinuousModification::RemoveAllSubtypes {
+                    set: crate::types::card_type::SubtypeSet::Creature,
+                }) && changer_modifications.contains(&ContinuousModification::AddChosenSubtype {
+                    kind: ChosenSubtypeKind::CreatureType,
+                }),
+                "Conspiracy must replace creature subtypes: {changer_modifications:?}"
+            );
+        } else {
+            assert!(
+                changer_modifications.contains(&ContinuousModification::AddAllCreatureTypes),
+                "Maskwood Nexus must add every creature type: {changer_modifications:?}"
+            );
+        }
+        let ts = state.next_timestamp();
+        {
+            let obj = state.objects.get_mut(&changer).unwrap();
+            obj.card_types.core_types.push(match changer_core_type {
+                "Artifact" => CoreType::Artifact,
+                _ => CoreType::Enchantment,
+            });
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions = changer_parsed.statics.clone().into();
+            obj.base_static_definitions = Arc::new(changer_parsed.statics.clone());
+            obj.timestamp = ts;
+            if let Some(chosen) = changer_chosen_type {
+                obj.chosen_attributes
+                    .push(ChosenAttribute::CreatureType(chosen.to_string()));
+            }
+        }
+
+        // Graveyard creature card you own, with a distinct activated ability.
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 4 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        let card = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Graveyard Creature".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&card).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push(printed_subtype.to_string());
+            obj.base_card_types = obj.card_types.clone();
+            Arc::make_mut(&mut obj.base_abilities).push(ability.clone());
+            obj.abilities = Arc::clone(&obj.base_abilities);
+        }
+
+        state.layers_dirty.mark_full();
+        (state, thranduil, card, ability)
+    }
+
+    /// CR 613.1d + CR 613.1f + CR 611.3a: a graveyard creature card that GAINS
+    /// the Elf subtype from a layer-4 effect (Maskwood Nexus: "creature cards
+    /// you own that aren't on the battlefield" are every creature type) becomes
+    /// a provider for Thranduil, because provider membership is resolved after
+    /// the type-changing layer, not from printed types. Real parser →
+    /// `flush_layers`. The positive reach-guard on the card's subtypes proves
+    /// the type change applied; reverting to gather-time provider selection
+    /// still leaves the card an Elf, but flips the grant assertion.
+    #[test]
+    fn thranduil_gains_ability_of_graveyard_card_made_an_elf_by_maskwood_nexus() {
+        let (mut state, thranduil, card, ability) = thranduil_with_type_changed_graveyard_card(
+            "Maskwood Nexus",
+            "Creatures you control are every creature type. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.\n{3}, {T}: Create a 2/2 blue Shapeshifter creature token with changeling. (It is every creature type.)",
+            "Artifact",
+            None,
+            "Goblin",
+        );
+
+        flush_layers(&mut state);
+
+        let card_obj = state.objects.get(&card).unwrap();
+        assert!(
+            card_obj.card_types.subtypes.iter().any(|s| s == "Elf"),
+            "reach-guard: Maskwood Nexus must make the graveyard card an Elf; got {:?}",
+            card_obj.card_types.subtypes
+        );
+        let abilities = &state.objects.get(&thranduil).unwrap().abilities;
+        assert!(
+            abilities.iter().any(|a| a == &ability),
+            "a graveyard card that became an Elf in layer 4 must donate in layer 6; got {abilities:?}"
+        );
+    }
+
+    /// CR 613.1d + CR 613.1f + CR 611.3a: a printed Elf in the graveyard that
+    /// LOSES the Elf subtype to a layer-4 effect (Conspiracy, chosen type
+    /// Goblin) stops being a provider. Real parser → `flush_layers`.
+    #[test]
+    fn thranduil_loses_ability_of_graveyard_elf_made_a_goblin_by_conspiracy() {
+        let (mut state, thranduil, card, ability) = thranduil_with_type_changed_graveyard_card(
+            "Conspiracy",
+            "As this enchantment enters, choose a creature type.\nCreatures you control are the chosen type. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.",
+            "Enchantment",
+            Some("Goblin"),
+            "Elf",
+        );
+
+        flush_layers(&mut state);
+
+        let card_obj = state.objects.get(&card).unwrap();
+        assert_eq!(
+            card_obj.card_types.subtypes,
+            vec!["Goblin".to_string()],
+            "reach-guard: Conspiracy must have turned the graveyard Elf into a Goblin"
+        );
+        let abilities = &state.objects.get(&thranduil).unwrap().abilities;
+        assert!(
+            !abilities.iter().any(|a| a == &ability),
+            "a printed Elf that is no longer an Elf must not donate; got {abilities:?}"
+        );
+    }
+
+    /// CR 305.7 + CR 613.1d + CR 613.1f: Song of the Dryads removes
+    /// Thranduil's printed grant before it can donate in layer 6. The Forest
+    /// intrinsic mana ability remains after that removal.
+    #[test]
+    fn song_of_the_dryads_suppresses_thranduil_graveyard_grant() {
+        let mut scenario = GameScenario::new();
+        let thranduil = scenario
+            .add_creature(P0, "Thranduil, the Elvenking", 5, 6)
+            .with_subtypes(vec!["Elf", "Noble"])
+            .from_oracle_text(
+                "Thranduil has all activated abilities of all Elf cards in your graveyard.\nWhenever another legendary Elf you control enters, draw two cards, then discard a card.",
+            )
+            .id();
+        let donated = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 4 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        scenario
+            .add_creature_to_graveyard(P0, "Test Elf Donor", 1, 1)
+            .with_subtypes(vec!["Elf"])
+            .with_ability_definition(donated.clone());
+        let song = scenario
+            .add_creature(P0, "Song of the Dryads", 0, 0)
+            .as_enchantment()
+            .from_oracle_text("Enchant permanent\nEnchanted permanent is a colorless Forest land.")
+            .id();
+        let mut state = scenario.build().state().clone();
+        {
+            let song_object = state.objects.get_mut(&song).unwrap();
+            song_object.card_types.subtypes.push("Aura".to_string());
+            song_object.base_card_types = song_object.card_types.clone();
+        }
+        assert!(
+            state.objects[&song]
+                .static_definitions
+                .iter_all()
+                .any(|definition| {
+                    definition.modifications.iter().any(|modification| {
+                        matches!(
+                            modification,
+                            ContinuousModification::SetBasicLandType {
+                                land_type: BasicLandType::Forest
+                            }
+                        )
+                    })
+                }),
+            "Song's complete Oracle text must parse to its Forest type effect"
+        );
+
+        state.layers_dirty.mark_full();
+        flush_layers(&mut state);
+        assert!(
+            state.objects[&thranduil].abilities.contains(&donated),
+            "the unsuppressed printed static must donate the graveyard ability"
+        );
+
+        attach_to(&mut state, song, thranduil);
+        assert_eq!(state.objects[&song].attached_to, Some(thranduil.into()));
+        for full_reflush in [false, true] {
+            if full_reflush {
+                state.layers_dirty.mark_full();
+                flush_layers(&mut state);
+            }
+            let host = &state.objects[&thranduil];
+            assert_eq!(host.card_types.core_types, vec![CoreType::Land]);
+            assert!(host.card_types.subtypes.contains(&"Forest".to_string()));
+            assert!(
+                host.static_definitions.is_empty(),
+                "CR 305.7: Song must remove Thranduil's printed static"
+            );
+            assert!(
+                !host.abilities.contains(&donated),
+                "a removed printed static must not donate its distinct ability"
+            );
+            assert_eq!(
+                count_mana_abilities(host, ManaColor::Green),
+                1,
+                "CR 305.7: Forest must retain its intrinsic green mana ability"
+            );
+        }
+    }
+
     /// CR 109.5 + CR 604.1: `expand_granted_activated_abilities` memoizes the
     /// matching-provider set per recipient controller. With K recipients sharing
     /// ONE controller, the provider filter sweep runs exactly once (M scans, one
@@ -24878,6 +25412,79 @@ mod tests {
             !opc.has_keyword(&Keyword::Lifelink),
             "Opponent commander no lifelink"
         );
+    }
+
+    /// Structural guard for the layer-pass collector: a granted static's
+    /// candidates cover every battlefield object whenever the host filter reads
+    /// a layer-writable characteristic, and only the post-layer-1 matches when
+    /// it reads none. Existence is decided later, at application.
+    #[test]
+    fn layer_pass_collector_adds_late_granted_static_candidates_by_host_filter_reads() {
+        let inner = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ]);
+        let creature_host = |_: ObjectId| TargetFilter::Typed(TypedFilter::creature());
+        let specific_host = |recipient: ObjectId| TargetFilter::SpecificObject { id: recipient };
+        let power_host = |_: ObjectId| {
+            TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 3 },
+                }]),
+            )
+        };
+        let legs: [(&dyn Fn(ObjectId) -> TargetFilter, bool); 3] = [
+            (&creature_host, true),
+            (&specific_host, false),
+            (&power_host, true),
+        ];
+        for (host_filter, every_object) in legs {
+            let mut state = setup();
+            let host = make_creature(&mut state, "Host", 1, 1, PlayerId(0));
+            let recipient = make_creature(&mut state, "Recipient", 1, 1, PlayerId(0));
+            let artifact = create_object(
+                &mut state,
+                CardId(0),
+                PlayerId(0),
+                "Noncreature Artifact".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&artifact).unwrap();
+                obj.card_types.core_types.push(CoreType::Artifact);
+                obj.base_card_types = obj.card_types.clone();
+            }
+            state
+                .objects
+                .get_mut(&host)
+                .unwrap()
+                .static_definitions
+                .push(
+                    StaticDefinition::continuous()
+                        .affected(host_filter(recipient))
+                        .modifications(vec![ContinuousModification::GrantStaticAbility {
+                            definition: Box::new(inner.clone()),
+                        }]),
+                );
+
+            let mut children: HashMap<ObjectId, usize> = HashMap::new();
+            for effect in collect_layer_pass_active_continuous_effects(&state) {
+                if granted_static_child_origin(&effect).is_some() {
+                    *children.entry(effect.source_id).or_default() += 1;
+                }
+            }
+            let expected: HashMap<ObjectId, usize> = if every_object {
+                [(host, 2), (recipient, 2), (artifact, 2)].into()
+            } else {
+                [(recipient, 2)].into()
+            };
+            assert_eq!(children, expected);
+        }
     }
 
     /// CR 613.7a (1st sentence): a granted static ability's continuous effect uses
