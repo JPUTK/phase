@@ -3206,21 +3206,31 @@ fn derive_layer_characteristics(state: &mut GameState) -> Vec<ObjectId> {
 
         if !layer_bucket.is_empty() {
             let layer_effects: Vec<&ActiveContinuousEffect> = layer_bucket.iter().collect();
-
-            let ordered = if layer.has_dependency_ordering() {
-                order_with_dependencies(&layer_effects, state)
-            } else {
-                order_by_timestamp(&layer_effects)
-            };
-
-            for effect in &ordered {
-                apply_continuous_effect(
+            if *layer == Layer::Ability && layer_effects.iter().any(|e| is_referenced_grant(e)) {
+                apply_ability_effects_with_referenced_grants(
                     state,
-                    effect,
+                    &layer_effects,
+                    None,
                     &mut abilities_suppressed,
                     &mut zone_cache,
                     &mut started_effect_sets,
                 );
+            } else {
+                let ordered = if layer.has_dependency_ordering() {
+                    order_with_dependencies(&layer_effects, state)
+                } else {
+                    order_by_timestamp(&layer_effects)
+                };
+
+                for effect in &ordered {
+                    apply_continuous_effect(
+                        state,
+                        effect,
+                        &mut abilities_suppressed,
+                        &mut zone_cache,
+                        &mut started_effect_sets,
+                    );
+                }
             }
         }
 
@@ -4812,6 +4822,17 @@ fn prepare_incremental_flush(
         return None;
     }
 
+    // CR 613.6: A restricted pass cannot decide whether an outside-slice
+    // carrier received its original static grant. Re-derive both populations
+    // together when any part of that inner static can reach an entrant.
+    if active_effects.iter().any(|effect| {
+        !recipient_ids.contains(&effect.source_id)
+            && effect_can_reach_incremental_recipients(effect, &recipient_ids)
+            && referenced_granted_static_parent(state, effect).is_some()
+    }) {
+        return None;
+    }
+
     Some(PreparedIncrementalFlush {
         recipient_ids,
         active_effects,
@@ -4921,8 +4942,7 @@ struct LiveCharacteristicReads {
 /// | The Ring emblem (CR 701.54c) | `None` | nothing to see |
 /// | [`active_continuous_effects_from_static_definitions`] (printed statics) | `def.condition` | `e.condition` AND the source walk |
 /// | [`expand_granted_static_effects`] | `inner.condition` | `e.condition` ONLY |
-/// | `expand_granted_activated_abilities` | `None` | nothing to see |
-/// | `expand_granted_triggered_abilities` | `None` | nothing to see |
+/// | referenced-provider meta effects (printed statics above) | `def.condition` | `e.condition` AND the source walk |
 /// | [`gather_transient_continuous_effects`] | recipient-context `tce.condition` only | `e.condition`, plus the transient walk for what it drops |
 /// | `stickers.rs` (two P/T sites) | `None` | nothing to see |
 ///
@@ -4972,6 +4992,16 @@ fn live_characteristic_reads(
                 q,
                 CHARACTERISTIC_READ_DEPTH,
             ));
+        }
+        // CR 611.3a: A referenced provider is read independently of the
+        // effect's CR 613.6 retained recipient set. An earlier layer can turn
+        // an entering object into a provider for an existing recipient.
+        match &e.modification {
+            ContinuousModification::GrantAllActivatedAbilitiesOf { source, .. }
+            | ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => {
+                global = global.union(target_filter_characteristic_reads(source));
+            }
+            _ => {}
         }
         affected = affected.union(target_filter_characteristic_reads(&e.affected_filter));
         // CR 611.2c + CR 611.3a: CR 611.2c locks in the affected SET of a
@@ -5418,6 +5448,23 @@ fn active_effects_force_incremental_escalation(
     active_effects: &[ActiveContinuousEffect],
 ) -> bool {
     active_effects.iter().any(|e| {
+        // CR 611.3a: The provider population can change for a pre-existing
+        // recipient on entry, even when that recipient's affected set cannot.
+        // Test each live controller because "you" is bound at the recipient.
+        if let ContinuousModification::GrantAllActivatedAbilitiesOf { source, .. }
+        | ContinuousModification::GrantAllTriggeredAbilitiesOf { source } = &e.modification
+        {
+            let controllers: HashSet<_> =
+                state.objects.values().map(|obj| obj.controller).collect();
+            if controllers.iter().any(|&controller| {
+                let ctx = FilterContext::from_source_with_controller(e.source_id, controller);
+                entered_ids
+                    .iter()
+                    .any(|&id| id != e.source_id && matches_target_filter(state, id, source, &ctx))
+            }) {
+                return true;
+            }
+        }
         let (magnitude_sensitive, affected_sensitive) = effect_population_reads(e);
         if !magnitude_sensitive && !affected_sensitive {
             return false;
@@ -6213,20 +6260,31 @@ fn apply_layers_incremental(
         }
         if !layer_bucket.is_empty() {
             let layer_effects: Vec<&ActiveContinuousEffect> = layer_bucket.iter().collect();
-            let ordered = if layer.has_dependency_ordering() {
-                order_with_dependencies(&layer_effects, state)
-            } else {
-                order_by_timestamp(&layer_effects)
-            };
-            for effect in &ordered {
-                apply_continuous_effect_to(
+            if *layer == Layer::Ability && layer_effects.iter().any(|e| is_referenced_grant(e)) {
+                apply_ability_effects_with_referenced_grants(
                     state,
-                    effect,
-                    &recipient_ids,
+                    &layer_effects,
+                    Some(&recipient_ids),
                     &mut abilities_suppressed,
                     &mut zone_cache,
                     &mut started_effect_sets,
                 );
+            } else {
+                let ordered = if layer.has_dependency_ordering() {
+                    order_with_dependencies(&layer_effects, state)
+                } else {
+                    order_by_timestamp(&layer_effects)
+                };
+                for effect in &ordered {
+                    apply_continuous_effect_to(
+                        state,
+                        effect,
+                        &recipient_ids,
+                        &mut abilities_suppressed,
+                        &mut zone_cache,
+                        &mut started_effect_sets,
+                    );
+                }
             }
         }
         // CR 613.1f: mirror the full-pass end-of-Layer-6 denial hook for the
@@ -6836,52 +6894,10 @@ fn active_continuous_effects_from_static_definitions(
                 // `static_definitions` for inspectability and downstream
                 // queries (e.g., parser/coverage walks).
             }
-            // CR 613.1f + CR 113.3: "~ has all activated abilities of [source]"
-            // (Myr Welder, Territory Forge, …). Expand into one `GrantAbility` per
-            // activated ability of each object matching `source`, so the dynamic
-            // set is recomputed each pass and reuses the existing GrantAbility
-            // apply + dedup. The meta-effect itself has no standalone layer-6
-            // behaviour, so skip pushing it.
-            if let ContinuousModification::GrantAllActivatedAbilitiesOf { source, cap } =
-                modification
-            {
-                effects.extend(expand_granted_activated_abilities(
-                    state,
-                    source_id,
-                    timestamp,
-                    &affected_filter,
-                    source,
-                    cap.as_ref(),
-                ));
-                continue;
-            }
-            // CR 613.1f + CR 603.1: "~ has all triggered abilities of [source]"
-            // (Koh, the Face Stealer). Triggered-ability mirror of the activated
-            // expansion above: expand into one `GrantTrigger` per triggered ability
-            // of each object matching `source`, recomputed each pass and reusing the
-            // existing `GrantTrigger` apply + dedup. No `cap` — triggered abilities
-            // carry no activation use-restriction (CR 602.5b is activated-only). The
-            // meta-effect itself has no standalone layer-6 behaviour, so skip it.
-            if let ContinuousModification::GrantAllTriggeredAbilitiesOf { source } = modification {
-                let host_origin = state
-                    .objects
-                    .get(&source_id)
-                    .map(|source| TriggerProducerOrigin::Static {
-                        source: ObjectIncarnationRef::from_object(source),
-                        definition_index: def_idx,
-                        modification_index: mod_index,
-                    })
-                    .expect("static source must remain addressable while gathering effects");
-                effects.extend(expand_granted_triggered_abilities(
-                    state,
-                    source_id,
-                    timestamp,
-                    &affected_filter,
-                    source,
-                    host_origin,
-                ));
-                continue;
-            }
+            // CR 611.3a + CR 613.1f: Referenced-provider grants stay as their
+            // original static effects until layer 6. Earlier layers may change
+            // provider membership, and other layer-6 effects may change the
+            // abilities they donate before this effect applies.
             effects.push(ActiveContinuousEffect {
                 source_id,
                 controller,
@@ -7006,16 +7022,32 @@ fn expand_granted_static_effects(
     out
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ReferencedGrantOutput {
+    generator_live: bool,
+    recipients: Vec<ObjectId>,
+    providers: Vec<(ObjectId, ObjectId)>,
+    grants: Vec<(
+        ObjectId,
+        ObjectId,
+        ContinuousModification,
+        Option<crate::types::ability::TriggerDefinitionRef>,
+    )>,
+}
+
+struct ExpandedReferencedGrants {
+    output: ReferencedGrantOutput,
+    effects: Vec<ActiveContinuousEffect>,
+}
+
 /// CR 613.1f + CR 113.3: Expand a `GrantAllActivatedAbilitiesOf { source }` host
 /// modification into one `GrantAbility` effect per activated ability of each
-/// object matching `source`. Object-self references in `source` are resolved
-/// relative to the host static, while controller-relative references use each
-/// recipient's controller. Provider objects are scanned across all zones — the
-/// granted-from cards are typically in exile, not on the battlefield — in
-/// deterministic `ObjectId` order. Both mana and non-mana activated abilities
-/// are granted. Synthesized effects target the recipient via `SelfRef`, reusing
-/// the layer-6 `GrantAbility` apply and its structural dedup, and are recomputed
-/// each pass so the granted set tracks the current `source` membership.
+/// object matching `source`. `affected_ids` have already passed the ordinary
+/// layer-6 condition, suppression and CR 613.6 recipient-set checks. Object-self
+/// references in `source` use the host, while controller-relative references
+/// use each recipient's current controller. Provider objects are scanned across
+/// all zones in deterministic `ObjectId` order. Both mana and non-mana activated
+/// abilities are granted through the existing `GrantAbility` apply and dedup.
 ///
 /// CR 602.5b + CR 602.5c: When `cap` is `Some`, that use-restriction is injected
 /// into each donated ability's `activation_restrictions` before it is granted, so
@@ -7026,12 +7058,14 @@ fn expand_granted_activated_abilities(
     state: &GameState,
     host_source_id: ObjectId,
     host_timestamp: u64,
-    host_affected_filter: &TargetFilter,
+    affected_ids: &[ObjectId],
     source: &TargetFilter,
     cap: Option<&ActivationRestriction>,
-) -> Vec<ActiveContinuousEffect> {
-    let host_ctx = crate::game::filter::FilterContext::from_source(state, host_source_id);
-    let mut out = Vec::new();
+) -> ExpandedReferencedGrants {
+    let mut out = ExpandedReferencedGrants {
+        output: ReferencedGrantOutput::default(),
+        effects: Vec::new(),
+    };
     let mut provider_ids: Vec<ObjectId> = state.objects.keys().copied().collect();
     provider_ids.sort_unstable_by_key(|id| id.0);
     // CR 109.5: the provider `source` filter resolves through a context built
@@ -7043,15 +7077,8 @@ fn expand_granted_activated_abilities(
     // emission (CR 613.1f), keeping the emitted set byte-identical.
     let mut providers_by_controller: std::collections::HashMap<PlayerId, Vec<ObjectId>> =
         std::collections::HashMap::new();
-    for &recipient_id in &state.battlefield {
-        if !crate::game::filter::matches_target_filter(
-            state,
-            recipient_id,
-            host_affected_filter,
-            &host_ctx,
-        ) {
-            continue;
-        }
+    for &recipient_id in affected_ids {
+        out.output.recipients.push(recipient_id);
         let recipient_controller = match state.objects.get(&recipient_id) {
             Some(obj) => obj.controller,
             None => continue,
@@ -7095,6 +7122,7 @@ fn expand_granted_activated_abilities(
             if provider_id == recipient_id {
                 continue;
             }
+            out.output.providers.push((recipient_id, provider_id));
             let Some(provider) = state.objects.get(&provider_id) else {
                 continue;
             };
@@ -7115,7 +7143,13 @@ fn expand_granted_activated_abilities(
                         donated.activation_restrictions.push(restriction.clone());
                     }
                 }
-                out.push(ActiveContinuousEffect {
+                let modification = ContinuousModification::GrantAbility {
+                    definition: Box::new(donated),
+                };
+                out.output
+                    .grants
+                    .push((recipient_id, provider_id, modification.clone(), None));
+                out.effects.push(ActiveContinuousEffect {
                     source_id: recipient_id,
                     controller: recipient_controller,
                     def_index: None,
@@ -7125,9 +7159,7 @@ fn expand_granted_activated_abilities(
                     mod_index: next_mod_index,
                     layer: Layer::Ability,
                     timestamp: host_timestamp,
-                    modification: ContinuousModification::GrantAbility {
-                        definition: Box::new(donated),
-                    },
+                    modification,
                     affected_filter: TargetFilter::SelfRef,
                     condition: None,
                     mode: StaticMode::Continuous,
@@ -7151,10 +7183,10 @@ fn expand_granted_activated_abilities(
 /// every layer pass exactly like `abilities` (layers.rs reset loop), so an exiled
 /// provider's printed triggers are present at expansion time, identical to how
 /// the activated mirror reads live `abilities`. Synthesized effects target the
-/// recipient via `SelfRef`, reusing the layer-6 `GrantTrigger` apply and its
-/// structural dedup, and are recomputed each pass so the granted set tracks the
-/// current `source` membership. No `cap`: triggered abilities carry no activation
-/// use-restriction (CR 602.5b is activated-only). The `source` filter resolves
+/// recipient via `SelfRef`; their already-qualified recipients use the same
+/// `GrantTrigger` occurrence installer as ordinary grants. No `cap`: triggered
+/// abilities carry no activation use-restriction (CR 602.5b is activated-only).
+/// The `source` filter resolves
 /// against the host id with each recipient's controller, memoized per controller
 /// — mirroring the activated expander exactly; the recipient-equality self-skip
 /// (CR 613.1f) stays per-recipient at emission.
@@ -7162,25 +7194,20 @@ fn expand_granted_triggered_abilities(
     state: &GameState,
     host_source_id: ObjectId,
     host_timestamp: u64,
-    host_affected_filter: &TargetFilter,
+    affected_ids: &[ObjectId],
     source: &TargetFilter,
     host_origin: TriggerProducerOrigin,
-) -> Vec<ActiveContinuousEffect> {
-    let host_ctx = crate::game::filter::FilterContext::from_source(state, host_source_id);
-    let mut out = Vec::new();
+) -> ExpandedReferencedGrants {
+    let mut out = ExpandedReferencedGrants {
+        output: ReferencedGrantOutput::default(),
+        effects: Vec::new(),
+    };
     let mut provider_ids: Vec<ObjectId> = state.objects.keys().copied().collect();
     provider_ids.sort_unstable_by_key(|id| id.0);
     let mut providers_by_controller: std::collections::HashMap<PlayerId, Vec<ObjectId>> =
         std::collections::HashMap::new();
-    for &recipient_id in &state.battlefield {
-        if !crate::game::filter::matches_target_filter(
-            state,
-            recipient_id,
-            host_affected_filter,
-            &host_ctx,
-        ) {
-            continue;
-        }
+    for &recipient_id in affected_ids {
+        out.output.recipients.push(recipient_id);
         let recipient_controller = match state.objects.get(&recipient_id) {
             Some(obj) => obj.controller,
             None => continue,
@@ -7211,23 +7238,32 @@ fn expand_granted_triggered_abilities(
             if provider_id == recipient_id {
                 continue;
             }
+            out.output.providers.push((recipient_id, provider_id));
             let Some(provider) = state.objects.get(&provider_id) else {
                 continue;
             };
             for entry in provider.trigger_definitions.iter_all() {
-                out.push(ActiveContinuousEffect {
+                let provider_ref = provider.trigger_definition_ref(entry);
+                let modification = ContinuousModification::GrantTrigger {
+                    trigger: Box::new(entry.definition.clone()),
+                };
+                out.output.grants.push((
+                    recipient_id,
+                    provider_id,
+                    modification.clone(),
+                    Some(provider_ref.clone()),
+                ));
+                out.effects.push(ActiveContinuousEffect {
                     source_id: recipient_id,
                     controller: recipient_controller,
                     def_index: None,
                     transient_id: None,
                     trigger_producer_origin: Some(host_origin.clone()),
-                    expanded_trigger_provider: Some(provider.trigger_definition_ref(entry)),
+                    expanded_trigger_provider: Some(provider_ref),
                     mod_index: next_mod_index,
                     layer: Layer::Ability,
                     timestamp: host_timestamp,
-                    modification: ContinuousModification::GrantTrigger {
-                        trigger: Box::new(entry.definition.clone()),
-                    },
+                    modification,
                     affected_filter: TargetFilter::SelfRef,
                     condition: None,
                     mode: StaticMode::Continuous,
@@ -8026,29 +8062,18 @@ fn order_with_dependencies(
         }
     }
 
-    // CR 613.8c (tracking): the rule requires the order of remaining effects to be
-    // RE-EVALUATED after each effect is applied (an unapplied effect may become
-    // dependent on / independent of other unapplied effects). This is NOT
-    // implemented: the dependency graph above is computed ONCE and the Kahn pass
-    // below consumes that fixed graph without re-running `depends_on` between
-    // applications. Impact is zero today because `depends_on` is state-blind (see
-    // its doc comment) — its answers cannot change mid-pass, so compute-once equals
-    // iterative re-evaluation. This re-evaluation MUST be added if/when `depends_on`
-    // becomes state-aware (the two are coupled).
+    // CR 613.8c: This fixed graph remains the fast path for buckets without a
+    // referenced-provider grant. Its shape predicate is state-blind; buckets
+    // with a live provider read use the one-at-a-time selector below.
     let mut ordered = Vec::with_capacity(sorted.len());
     let mut processed = vec![false; sorted.len()];
 
     while ordered.len() < sorted.len() {
         let Some(next) = (0..sorted.len()).find(|&idx| !processed[idx] && in_degree[idx] == 0)
         else {
-            // CR 613.8b: Dependency cycle — fall back to timestamp ordering.
-            // CR 613.8b (tracking): the rule reverts ONLY the effects that are IN
-            // the dependency loop to timestamp order, leaving non-loop dependent
-            // effects ordered normally. This implementation is coarser: on ANY
-            // cycle it reverts the WHOLE layer bucket (`sorted`) to timestamp
-            // order. Deferred and unreachable today — no current card forms a
-            // dependency loop under the state-blind `depends_on` (see its doc
-            // comment), so the loop-only-vs-whole-bucket distinction is unobservable.
+            // CR 613.8b: This older state-blind path still falls back for the
+            // whole bucket on a cycle. The referenced-provider layer-6 path
+            // below limits timestamp fallback to cycle members.
             return sorted.iter().map(|effect| (*effect).clone()).collect();
         };
 
@@ -8060,6 +8085,461 @@ fn order_with_dependencies(
     }
 
     ordered
+}
+
+/// CR 613.8a: Observe the qualified recipients, exact providers and donated
+/// definitions under the normal layer-6 application authority. Trigger output
+/// carries the provider's occurrence, so identical payloads remain distinct.
+fn referenced_grant_output(
+    state: &GameState,
+    effect: &ActiveContinuousEffect,
+    restrict_to: Option<&BTreeSet<ObjectId>>,
+    abilities_suppressed: &HashSet<ObjectId>,
+    started_effect_sets: &StartedContinuousEffectSets,
+) -> ReferencedGrantOutput {
+    let mut scratch = state.clone();
+    let mut scratch_suppressed = abilities_suppressed.clone();
+    let mut scratch_started = started_effect_sets.clone();
+    let mut scratch_zones = LayerZoneObjectCache::default();
+    apply_continuous_effect_filtered(
+        &mut scratch,
+        effect,
+        restrict_to,
+        &mut scratch_suppressed,
+        &mut scratch_zones,
+        &mut scratch_started,
+    )
+    .unwrap_or_default()
+}
+
+fn is_referenced_grant(effect: &ActiveContinuousEffect) -> bool {
+    is_referenced_grant_modification(&effect.modification)
+}
+
+struct ReferencedReaderSelectionData {
+    parent: Option<ActiveContinuousEffect>,
+    reads: CharacteristicKinds,
+    original_static_granter: Option<ObjectId>,
+}
+
+struct ReferencedGrantSelectionCache {
+    controllers: Option<HashSet<PlayerId>>,
+    zones: LayerZoneObjectCache,
+    writer_candidates: Vec<Option<Vec<ObjectId>>>,
+    readers: Vec<Option<ReferencedReaderSelectionData>>,
+    parent_readers: Vec<Option<Vec<usize>>>,
+    cannot_reach: HashMap<(usize, usize), bool>,
+}
+
+impl ReferencedGrantSelectionCache {
+    fn new(len: usize) -> Self {
+        Self {
+            controllers: None,
+            zones: LayerZoneObjectCache::default(),
+            writer_candidates: std::iter::repeat_with(|| None).take(len).collect(),
+            readers: std::iter::repeat_with(|| None).take(len).collect(),
+            parent_readers: std::iter::repeat_with(|| None).take(len).collect(),
+            cannot_reach: HashMap::new(),
+        }
+    }
+
+    fn reader_data(
+        &mut self,
+        state: &GameState,
+        pending: &[ActiveContinuousEffect],
+        reader_index: usize,
+    ) -> &ReferencedReaderSelectionData {
+        self.readers[reader_index].get_or_insert_with(|| {
+            let reader = &pending[reader_index];
+            let source = match &reader.modification {
+                ContinuousModification::GrantAllActivatedAbilitiesOf { source, .. }
+                | ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => source,
+                _ => unreachable!("selection metadata is only requested for referenced grants"),
+            };
+            let parent = referenced_granted_static_parent(state, reader);
+            let mut reads = target_filter_characteristic_reads(source)
+                .union(target_filter_characteristic_reads(&reader.affected_filter))
+                .union(
+                    reader
+                        .condition
+                        .as_ref()
+                        .map(static_condition_characteristic_reads)
+                        .unwrap_or(CharacteristicKinds::EMPTY),
+                );
+            if let Some(parent) = &parent {
+                reads = reads
+                    .union(target_filter_characteristic_reads(&parent.affected_filter))
+                    .union(
+                        parent
+                            .condition
+                            .as_ref()
+                            .map(static_condition_characteristic_reads)
+                            .unwrap_or(CharacteristicKinds::EMPTY),
+                    );
+            }
+            // CR 613.8a: Removing the original static granter can suppress an
+            // unstarted synthesized reader even when it touches neither its
+            // recipient nor a provider. Transients have no live granter here.
+            let original_static_granter = if reader.def_index.is_none()
+                && reader.transient_id.is_none()
+            {
+                match reader.trigger_producer_origin.as_ref() {
+                    Some(TriggerProducerOrigin::Static { source, .. }) => Some(source.object_id),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            ReferencedReaderSelectionData {
+                parent,
+                reads,
+                original_static_granter,
+            }
+        })
+    }
+
+    fn parent_readers(
+        &mut self,
+        state: &GameState,
+        pending: &[ActiveContinuousEffect],
+        parent_index: usize,
+    ) -> &[usize] {
+        if self.parent_readers[parent_index].is_none() {
+            let parent = &pending[parent_index];
+            let readers = pending
+                .iter()
+                .enumerate()
+                .filter_map(|(index, reader)| {
+                    (is_referenced_grant(reader)
+                        && self
+                            .reader_data(state, pending, index)
+                            .parent
+                            .as_ref()
+                            .is_some_and(|original| {
+                                original.source_id == parent.source_id
+                                    && original.def_index == parent.def_index
+                                    && original.transient_id == parent.transient_id
+                                    && original.trigger_producer_origin
+                                        == parent.trigger_producer_origin
+                            }))
+                    .then_some(index)
+                })
+                .collect();
+            self.parent_readers[parent_index] = Some(readers);
+        }
+        self.parent_readers[parent_index].as_deref().unwrap()
+    }
+
+    /// A layer-6 ability writer cannot change this reader when its reader and
+    /// exact original grant do not read abilities and it reaches neither a
+    /// provider, the carrier, nor the original granter. Reject before preview.
+    fn writer_cannot_reach_referenced_read(
+        &mut self,
+        state: &GameState,
+        pending: &[ActiveContinuousEffect],
+        reader_index: usize,
+        writer_index: usize,
+    ) -> bool {
+        if let Some(&answer) = self.cannot_reach.get(&(reader_index, writer_index)) {
+            return answer;
+        }
+        let reader = &pending[reader_index];
+        let writer = &pending[writer_index];
+        let data = self.reader_data(state, pending, reader_index);
+        let answer = if data.reads.intersects(CharacteristicKinds::ABILITIES) {
+            false
+        } else {
+            let original_static_granter = data.original_static_granter;
+            let source = match &reader.modification {
+                ContinuousModification::GrantAllActivatedAbilitiesOf { source, .. }
+                | ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => source,
+                _ => unreachable!("reach is only requested for referenced grants"),
+            };
+            let candidate_ids = self.writer_candidates[writer_index].get_or_insert_with(|| {
+                effect_candidate_ids(
+                    state,
+                    &writer.affected_filter,
+                    writer.source_id,
+                    &mut self.zones,
+                )
+            });
+            let controllers = self
+                .controllers
+                .get_or_insert_with(|| state.objects.values().map(|obj| obj.controller).collect());
+            !candidate_ids.iter().any(|&id| {
+                id == reader.source_id
+                    || original_static_granter == Some(id)
+                    || controllers.iter().any(|&controller| {
+                        let ctx = FilterContext::from_source_with_controller(
+                            reader.source_id,
+                            controller,
+                        );
+                        matches_target_filter(state, id, source, &ctx)
+                    })
+            })
+        };
+        self.cannot_reach
+            .insert((reader_index, writer_index), answer);
+        answer
+    }
+}
+
+fn referenced_grant_depends_on(
+    state: &GameState,
+    reader: &ActiveContinuousEffect,
+    writer: &ActiveContinuousEffect,
+    restrict_to: Option<&BTreeSet<ObjectId>>,
+    abilities_suppressed: &HashSet<ObjectId>,
+    started_effect_sets: &StartedContinuousEffectSets,
+    before: &ReferencedGrantOutput,
+) -> bool {
+    let mut scratch = state.clone();
+    let mut scratch_suppressed = abilities_suppressed.clone();
+    let mut scratch_started = started_effect_sets.clone();
+    let mut scratch_zones = LayerZoneObjectCache::default();
+    apply_continuous_effect_filtered(
+        &mut scratch,
+        writer,
+        restrict_to,
+        &mut scratch_suppressed,
+        &mut scratch_zones,
+        &mut scratch_started,
+    );
+    *before
+        != referenced_grant_output(
+            &scratch,
+            reader,
+            restrict_to,
+            &scratch_suppressed,
+            &scratch_started,
+        )
+}
+
+fn referenced_parent_affected_set(
+    state: &GameState,
+    parent: &ActiveContinuousEffect,
+    restrict_to: Option<&BTreeSet<ObjectId>>,
+    abilities_suppressed: &HashSet<ObjectId>,
+    started_effect_sets: &StartedContinuousEffectSets,
+) -> Vec<ObjectId> {
+    let Some(key) = continuous_effect_group_key(state, parent) else {
+        return Vec::new();
+    };
+    let mut scratch = state.clone();
+    let mut scratch_suppressed = abilities_suppressed.clone();
+    let mut scratch_started = started_effect_sets.clone();
+    let mut scratch_zones = LayerZoneObjectCache::default();
+    apply_continuous_effect_filtered(
+        &mut scratch,
+        parent,
+        restrict_to,
+        &mut scratch_suppressed,
+        &mut scratch_zones,
+        &mut scratch_started,
+    );
+    scratch_started.get(&key).cloned().unwrap_or_default()
+}
+
+fn referenced_parent_depends_on(
+    state: &GameState,
+    parent: &ActiveContinuousEffect,
+    writer: &ActiveContinuousEffect,
+    restrict_to: Option<&BTreeSet<ObjectId>>,
+    abilities_suppressed: &HashSet<ObjectId>,
+    started_effect_sets: &StartedContinuousEffectSets,
+    before: &[ObjectId],
+) -> bool {
+    let mut scratch = state.clone();
+    let mut scratch_suppressed = abilities_suppressed.clone();
+    let mut scratch_started = started_effect_sets.clone();
+    let mut scratch_zones = LayerZoneObjectCache::default();
+    apply_continuous_effect_filtered(
+        &mut scratch,
+        writer,
+        restrict_to,
+        &mut scratch_suppressed,
+        &mut scratch_zones,
+        &mut scratch_started,
+    );
+    let after = referenced_parent_affected_set(
+        &scratch,
+        parent,
+        restrict_to,
+        &scratch_suppressed,
+        &scratch_started,
+    );
+    before != after.as_slice()
+}
+
+fn dependency_path_exists(edges: &[Vec<usize>], from: usize, target: usize) -> bool {
+    let mut visited = vec![false; edges.len()];
+    let mut pending = vec![from];
+    while let Some(node) = pending.pop() {
+        if node == target {
+            return true;
+        }
+        if !visited[node] {
+            visited[node] = true;
+            pending.extend(edges[node].iter().copied());
+        }
+    }
+    false
+}
+
+/// CR 613.8b-c: Select and apply one ability-layer effect, then rebuild the
+/// remaining dependency relation from the changed state. On a loop, only a
+/// member of that loop takes the timestamp fallback.
+fn apply_ability_effects_with_referenced_grants(
+    state: &mut GameState,
+    effects: &[&ActiveContinuousEffect],
+    restrict_to: Option<&BTreeSet<ObjectId>>,
+    abilities_suppressed: &mut HashSet<ObjectId>,
+    zone_cache: &mut LayerZoneObjectCache,
+    started_effect_sets: &mut StartedContinuousEffectSets,
+) {
+    let mut pending = order_by_timestamp(effects);
+    while !pending.is_empty() {
+        // Selection-local observations expire before pending changes or the
+        // chosen effect mutates real state; AFTER previews use fresh state.
+        let next = {
+            let mut edges = vec![Vec::new(); pending.len()];
+            let mut before_outputs: Vec<Option<ReferencedGrantOutput>> = vec![None; pending.len()];
+            let mut before_parent_sets: Vec<Option<Vec<ObjectId>>> = vec![None; pending.len()];
+            let mut cache = ReferencedGrantSelectionCache::new(pending.len());
+            for i in 0..pending.len() {
+                for j in 0..pending.len() {
+                    if i == j {
+                        continue;
+                    }
+                    let dependent = if is_referenced_grant(&pending[i]) {
+                        // The cheap reach rejection precedes the first reader
+                        // output clone; one baseline output is reused for every
+                        // candidate writer in this selection.
+                        let writer = &pending[j];
+                        let reader = &pending[i];
+                        // CR 613.8a: Only matching CDA classes and distinct
+                        // generators can depend. The group key distinguishes
+                        // separate granted statics on the same recipient; absent
+                        // keys do not prove that two effects share a generator.
+                        // The writer must reach an ability read before preview.
+                        if reader.characteristic_defining != writer.characteristic_defining
+                            || continuous_effect_group_key(state, reader)
+                                .zip(continuous_effect_group_key(state, writer))
+                                .is_some_and(|(reader_group, writer_group)| {
+                                    reader_group == writer_group
+                                })
+                            || !modification_characteristic_writes(&writer.modification)
+                                .intersects(CharacteristicKinds::ABILITIES)
+                            || cache.writer_cannot_reach_referenced_read(state, &pending, i, j)
+                        {
+                            false
+                        } else {
+                            let before = before_outputs[i].get_or_insert_with(|| {
+                                referenced_grant_output(
+                                    state,
+                                    reader,
+                                    restrict_to,
+                                    abilities_suppressed,
+                                    started_effect_sets,
+                                )
+                            });
+                            referenced_grant_depends_on(
+                                state,
+                                reader,
+                                writer,
+                                restrict_to,
+                                abilities_suppressed,
+                                started_effect_sets,
+                                before,
+                            )
+                        }
+                    } else if matches!(
+                        &pending[i].modification,
+                        ContinuousModification::GrantStaticAbility { definition }
+                            if definition.modifications.iter().any(is_referenced_grant_modification)
+                    ) {
+                        // CR 613.8a: A witness writer can enable the original
+                        // grant before its nested reader has any donor output.
+                        // Keep the parent's carrier-set comparison independent of
+                        // the reader's donated-definition comparison.
+                        let parent = &pending[i];
+                        let writer = &pending[j];
+                        if parent.characteristic_defining != writer.characteristic_defining
+                            || continuous_effect_group_key(state, parent)
+                                == continuous_effect_group_key(state, writer)
+                            || !modification_characteristic_writes(&writer.modification)
+                                .intersects(CharacteristicKinds::ABILITIES)
+                        {
+                            false
+                        } else {
+                            let reader_count = cache.parent_readers(state, &pending, i).len();
+                            let has_parent_sensitive_reader = (0..reader_count).any(|position| {
+                                let reader_index =
+                                    cache.parent_readers(state, &pending, i)[position];
+                                !cache.writer_cannot_reach_referenced_read(
+                                    state,
+                                    &pending,
+                                    reader_index,
+                                    j,
+                                )
+                            });
+                            if has_parent_sensitive_reader {
+                                let before = before_parent_sets[i].get_or_insert_with(|| {
+                                    referenced_parent_affected_set(
+                                        state,
+                                        parent,
+                                        restrict_to,
+                                        abilities_suppressed,
+                                        started_effect_sets,
+                                    )
+                                });
+                                referenced_parent_depends_on(
+                                    state,
+                                    parent,
+                                    writer,
+                                    restrict_to,
+                                    abilities_suppressed,
+                                    started_effect_sets,
+                                    before,
+                                )
+                            } else {
+                                depends_on(parent, writer, state)
+                            }
+                        }
+                    } else {
+                        depends_on(&pending[i], &pending[j], state)
+                    };
+                    if dependent {
+                        edges[i].push(j);
+                    }
+                }
+            }
+            // CR 613.8b: Ignore only edges within a dependency loop. An edge
+            // leaving that loop must still be satisfied. `j` is in `i`'s cyclic
+            // component exactly when both can reach each other. Pending is already
+            // timestamp-sorted, so wait for older members of the same loop.
+            (0..pending.len())
+                .find(|&i| {
+                    edges[i]
+                        .iter()
+                        .all(|&j| dependency_path_exists(&edges, j, i))
+                        && (0..i).all(|j| {
+                            !dependency_path_exists(&edges, i, j)
+                                || !dependency_path_exists(&edges, j, i)
+                        })
+                })
+                .expect("a finite dependency graph has an independent or cyclic effect")
+        };
+        let selected = pending.remove(next);
+        apply_continuous_effect_filtered(
+            state,
+            &selected,
+            restrict_to,
+            abilities_suppressed,
+            zone_cache,
+            started_effect_sets,
+        );
+    }
 }
 
 pub(crate) fn order_active_continuous_effects(
@@ -8086,14 +8566,9 @@ pub(crate) fn order_active_continuous_effects(
 /// This makes it both over-broad (any type/ability/PT change is treated as a
 /// dependency whenever `a`'s filter merely references that axis, even if `b` can't
 /// change `a`'s membership) and under-broad (it ignores existence/value/color
-/// dependencies the rule covers). It is nonetheless correct for every current
-/// card because, being state-blind, the predicate is invariant across an apply
-/// pass, so the dependency order computed once equals the order an iterative
-/// re-evaluation would produce — i.e. it reduces to timestamp order with the same
-/// observable result. Upgrading this to a state-aware predicate REQUIRES the
-/// CR 613.8c re-evaluation fix in `order_with_dependencies` (the two are coupled):
-/// a state-aware `depends_on` would change its answers as effects are applied, so
-/// a single Kahn pass would no longer be sound.
+/// dependencies the rule covers). The referenced-provider reader uses the
+/// state-aware preview above, with one-at-a-time CR 613.8c reevaluation. This
+/// predicate remains the state-blind relation for other effect pairs.
 fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &GameState) -> bool {
     // CR 613.7a + CR 613.8a: A single static ability's modifications share one
     // timestamp and apply in the order written (613.7a). "Depend on" (613.8a) is a
@@ -8104,6 +8579,9 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
     // AddSubtype survives, exactly as written.
     if a.source_id == b.source_id && a.def_index == b.def_index && a.transient_id == b.transient_id
     {
+        return false;
+    }
+    if a.characteristic_defining != b.characteristic_defining {
         return false;
     }
 
@@ -8141,6 +8619,8 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
             | ContinuousModification::AddDynamicKeyword { .. }
             | ContinuousModification::AddKeywordWithDerivedCost { .. }
             | ContinuousModification::GrantAbility { .. }
+            | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+            | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
             | ContinuousModification::GrantTrigger { .. }
             | ContinuousModification::RemoveAllAbilities
             | ContinuousModification::AddStaticMode { .. }
@@ -8515,6 +8995,32 @@ fn install_trigger_candidate(
         ));
 }
 
+/// Install the concrete GrantTrigger output after its generating effect has
+/// qualified the recipient. The ordinary GrantTrigger arm uses the same path.
+fn install_granted_trigger(
+    obj: &mut crate::game::game_object::GameObject,
+    effect: &ActiveContinuousEffect,
+    trigger: &crate::types::ability::TriggerDefinition,
+) {
+    // CR 201.5a + CR 613.1f: bind a granter by-name self-reference to the
+    // granting object before installing the recipient's trigger occurrence.
+    let mut granted = trigger.clone();
+    super::ability_utils::concretize_granting_object_in_trigger(&mut granted, effect.source_id);
+    let producer = effect
+        .expanded_trigger_provider
+        .as_ref()
+        .map(|provider| TriggerGrantProducerKey::ExpandedGrant {
+            origin: trigger_origin(effect),
+            provider: Box::new(provider.clone()),
+            provider_output_index: 0,
+        })
+        .unwrap_or_else(|| TriggerGrantProducerKey::Granted {
+            origin: trigger_origin(effect),
+            output_index: 0,
+        });
+    install_trigger_candidate(obj, producer, granted);
+}
+
 fn trigger_origin(effect: &ActiveContinuousEffect) -> TriggerProducerOrigin {
     effect
         .trigger_producer_origin
@@ -8570,6 +9076,114 @@ fn continuous_effect_group_key(
         grant_origin,
         recipient: ObjectIncarnationRef::from_object(recipient),
     })
+}
+
+/// Find the exact functioning grant that produced a synthesized static. The
+/// collector remains the authority for source zone, duration, and occurrence.
+fn original_granted_static_parent(
+    state: &GameState,
+    effect: &ActiveContinuousEffect,
+) -> Option<ActiveContinuousEffect> {
+    if effect.def_index.is_some()
+        || effect.transient_id.is_some()
+        || effect.expanded_trigger_provider.is_some()
+    {
+        return None;
+    }
+    let origin = effect.trigger_producer_origin.as_ref()?;
+    let parents = match origin {
+        TriggerProducerOrigin::Static { source, .. } => {
+            let object = state.objects.get(&source.object_id)?;
+            if ObjectIncarnationRef::from_object(object) != *source {
+                return None;
+            }
+            active_continuous_effects_from_static_source(state, object)
+        }
+        TriggerProducerOrigin::Transient { .. } => {
+            let mut effects = Vec::new();
+            gather_transient_continuous_effects(state, &mut effects);
+            effects
+        }
+    };
+    parents.into_iter().find(|parent| {
+        parent.trigger_producer_origin.as_ref() == Some(origin)
+            && matches!(
+                &parent.modification,
+                ContinuousModification::GrantStaticAbility { .. }
+            )
+            && (parent.def_index.is_some() || parent.transient_id.is_some())
+    })
+}
+
+fn referenced_granted_static_parent(
+    state: &GameState,
+    effect: &ActiveContinuousEffect,
+) -> Option<ActiveContinuousEffect> {
+    original_granted_static_parent(state, effect).filter(|parent| {
+        matches!(
+            &parent.modification,
+            ContinuousModification::GrantStaticAbility { definition }
+                if definition.modifications.iter().any(is_referenced_grant_modification)
+        )
+    })
+}
+
+fn is_referenced_grant_modification(modification: &ContinuousModification) -> bool {
+    matches!(
+        modification,
+        ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+            | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+    )
+}
+
+/// CR 613.6: A granted static can retain its affected set only after its
+/// original grant qualified the carrier. The inner affected population is
+/// independent and is scanned by the ordinary application below.
+fn referenced_granted_static_parent_qualifies(
+    state: &GameState,
+    effect: &ActiveContinuousEffect,
+    restrict_to: Option<&BTreeSet<ObjectId>>,
+    abilities_suppressed: &HashSet<ObjectId>,
+    started_effect_sets: &StartedContinuousEffectSets,
+) -> bool {
+    if effect.def_index.is_some()
+        || effect.transient_id.is_some()
+        || effect.expanded_trigger_provider.is_some()
+        || effect.trigger_producer_origin.is_none()
+    {
+        return true;
+    }
+    let Some(parent) = original_granted_static_parent(state, effect) else {
+        return false;
+    };
+    if !matches!(
+        &parent.modification,
+        ContinuousModification::GrantStaticAbility { definition }
+            if definition.modifications.iter().any(is_referenced_grant_modification)
+    ) {
+        return true;
+    }
+    let Some(parent_key) = continuous_effect_group_key(state, &parent) else {
+        return false;
+    };
+    if let Some(affected) = started_effect_sets.get(&parent_key) {
+        return affected.contains(&effect.source_id);
+    }
+    let mut scratch = state.clone();
+    let mut scratch_suppressed = abilities_suppressed.clone();
+    let mut scratch_started = started_effect_sets.clone();
+    let mut scratch_zones = LayerZoneObjectCache::default();
+    apply_continuous_effect_filtered(
+        &mut scratch,
+        &parent,
+        restrict_to,
+        &mut scratch_suppressed,
+        &mut scratch_zones,
+        &mut scratch_started,
+    );
+    scratch_started
+        .get(&parent_key)
+        .is_some_and(|affected| affected.contains(&effect.source_id))
 }
 
 /// CR 613.1f + CR 613.6: Ability removal prevents an effect that has not begun
@@ -8763,11 +9377,27 @@ fn apply_continuous_effect_filtered(
     abilities_suppressed: &mut HashSet<ObjectId>,
     zone_cache: &mut LayerZoneObjectCache,
     started_effect_sets: &mut StartedContinuousEffectSets,
-) {
+) -> Option<ReferencedGrantOutput> {
     let group_key = continuous_effect_group_key(state, effect);
     let retained_affected_ids = group_key
         .as_ref()
         .and_then(|key| started_effect_sets.get(key));
+    let retained_affected_set_was_present = retained_affected_ids.is_some();
+
+    // CR 613.6: Qualify the carrier through its exact original grant before
+    // any part of an inner referenced-provider static can start its own set.
+    // A legitimately started inner group keeps that set in later layers.
+    if retained_affected_ids.is_none()
+        && !referenced_granted_static_parent_qualifies(
+            state,
+            effect,
+            restrict_to,
+            abilities_suppressed,
+            started_effect_sets,
+        )
+    {
+        return None;
+    }
 
     // CR 613.1f: A printed static on an object that lost all abilities this
     // pass must not re-apply in later layers (Death's Shadow CDA after
@@ -8778,7 +9408,7 @@ fn apply_continuous_effect_filtered(
     if retained_affected_ids.is_none()
         && unstarted_effect_generator_is_suppressed(effect, abilities_suppressed)
     {
-        return;
+        return None;
     }
 
     let newly_affected_ids;
@@ -8855,6 +9485,72 @@ fn apply_continuous_effect_filtered(
 
     record_remote_type_layer_recipients(state, effect, affected_ids);
     record_attribution(state, effect, affected_ids);
+
+    // CR 611.3a + CR 613.1f: Read referenced providers only after this
+    // effect's condition, suppression, retained affected set and incremental
+    // recipient restriction have been resolved by the ordinary apply path.
+    // Install each donated definition at this effect's layer-6 position.
+    let expanded = match &effect.modification {
+        ContinuousModification::GrantAllActivatedAbilitiesOf { source, cap } => {
+            Some(expand_granted_activated_abilities(
+                state,
+                effect.source_id,
+                effect.timestamp,
+                affected_ids,
+                source,
+                cap.as_ref(),
+            ))
+        }
+        ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => {
+            Some(expand_granted_triggered_abilities(
+                state,
+                effect.source_id,
+                effect.timestamp,
+                affected_ids,
+                source,
+                trigger_origin(effect),
+            ))
+        }
+        _ => None,
+    };
+    if let Some(mut expanded) = expanded {
+        // CR 613.8a: A source-level condition can change the existence of
+        // this effect even when no provider currently donates a definition.
+        // CR 613.6 retains a previously started effect through later layers.
+        expanded.output.generator_live = retained_affected_set_was_present
+            || effect.condition.as_ref().is_none_or(|condition| {
+                condition_uses_recipient_context(condition)
+                    || evaluate_condition(
+                        state,
+                        condition,
+                        active_effect_condition_controller(state, effect),
+                        effect.source_id,
+                    )
+            });
+        for grant in expanded.effects {
+            if let ContinuousModification::GrantTrigger { trigger } = &grant.modification {
+                // CR 613.6: The parent already qualified and retained this
+                // recipient. This concrete output is not a new static
+                // generator; only its trigger identity comes from the host
+                // and provider carried by `grant`.
+                let obj = state
+                    .objects
+                    .get_mut(&grant.source_id)
+                    .expect("qualified trigger recipient must still exist");
+                install_granted_trigger(obj, &grant, trigger);
+            } else {
+                apply_continuous_effect_filtered(
+                    state,
+                    &grant,
+                    restrict_to,
+                    abilities_suppressed,
+                    zone_cache,
+                    started_effect_sets,
+                );
+            }
+        }
+        return Some(expanded.output);
+    }
 
     // Pre-read chosen subtype from source (avoids borrow conflict in the loop).
     // Populated for `AddChosenSubtype { kind }` (additive — creature type or
@@ -9700,41 +10396,14 @@ fn apply_continuous_effect_filtered(
                     Arc::make_mut(&mut obj.abilities).push(granted);
                 }
             }
-            // CR 613.1f: Handled entirely at continuous-effect collection time —
-            // `active_continuous_effects_from_static_definitions` expands this into
-            // one `GrantAbility` effect per matching activated ability (it needs
-            // read access to the provider objects, which the per-object apply
-            // borrow cannot give). No direct per-object mutation here.
+            // CR 613.1f: Expanded before the per-recipient mutable borrow above.
             ContinuousModification::GrantAllActivatedAbilitiesOf { .. } => {}
-            // CR 613.1f: Mirror of the activated case above — expanded into one
-            // `GrantTrigger` per matching trigger at collection time
-            // (`expand_granted_triggered_abilities`). No direct per-object mutation.
+            // CR 613.1f: Triggered-ability mirror of the activated expansion.
             ContinuousModification::GrantAllTriggeredAbilitiesOf { .. } => {}
             // CR 604.1: Push granted trigger to trigger_definitions so
             // the trigger's event matching and condition metadata is preserved.
             ContinuousModification::GrantTrigger { trigger } => {
-                // CR 201.5a + CR 613.1f: concretize a granter by-name
-                // self-reference inside the granted trigger's execute chain
-                // (e.g. "you may sacrifice <granter>") to the live granting
-                // object before dedup/push. Re-minted each layer pass (CR 613.1f).
-                let mut granted = *trigger.clone();
-                super::ability_utils::concretize_granting_object_in_trigger(
-                    &mut granted,
-                    effect.source_id,
-                );
-                let producer = effect
-                    .expanded_trigger_provider
-                    .as_ref()
-                    .map(|provider| TriggerGrantProducerKey::ExpandedGrant {
-                        origin: trigger_origin(effect),
-                        provider: Box::new(provider.clone()),
-                        provider_output_index: 0,
-                    })
-                    .unwrap_or_else(|| TriggerGrantProducerKey::Granted {
-                        origin: trigger_origin(effect),
-                        output_index: 0,
-                    });
-                install_trigger_candidate(obj, producer, granted);
+                install_granted_trigger(obj, effect, trigger);
             }
             // CR 113.3d + CR 604.1 + CR 613.1f: Grant a full static ability to the
             // recipient. The inner static's `affected`/`condition`/`modifications`
@@ -9938,6 +10607,7 @@ fn apply_continuous_effect_filtered(
             }
         }
     }
+    None
 }
 
 // CR 305.7: Setting a land subtype replaces old land subtypes and removes the
@@ -17851,14 +18521,14 @@ mod tests {
         }
 
         let m = state.objects.len() as u64;
-        let affected = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
         let source = TargetFilter::ExiledBySource;
 
         // Single deterministic invocation of the seam so the per-pass scan count
         // is unambiguous (evaluate_layers re-runs the expansion each pass; this
         // isolates one pass). Single controller ⟹ exactly M provider scans.
         crate::game::perf_counters::reset();
-        let effects = expand_granted_activated_abilities(&state, host, 1, &affected, &source, None);
+        let effects =
+            expand_granted_activated_abilities(&state, host, 1, &recipients, &source, None).effects;
         let scans = crate::game::perf_counters::snapshot().granted_ability_provider_scans;
         assert_eq!(
             scans, m,
@@ -17946,13 +18616,20 @@ mod tests {
         });
 
         let m = state.objects.len() as u64;
-        let affected = TargetFilter::Typed(TypedFilter::creature());
         let source = TargetFilter::ExiledBySource;
 
         // Single deterministic invocation: two distinct recipient controllers ⟹
         // two cache entries ⟹ two full provider sweeps (2×M scans).
         crate::game::perf_counters::reset();
-        let effects = expand_granted_activated_abilities(&state, host, 1, &affected, &source, None);
+        let effects = expand_granted_activated_abilities(
+            &state,
+            host,
+            1,
+            &[recipient_p0, recipient_p1],
+            &source,
+            None,
+        )
+        .effects;
         let scans = crate::game::perf_counters::snapshot().granted_ability_provider_scans;
         assert_eq!(
             scans,
