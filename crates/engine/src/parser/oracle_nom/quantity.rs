@@ -6997,7 +6997,8 @@ fn parse_for_each_controlled_type_with_keyword(input: &str) -> OracleResult<'_, 
 /// shared property predicate after "with". This is intentionally broader than
 /// the card that first needs it: extending the existing property axis keeps P/T
 /// comparisons and future typed properties in the same for-each building block
-/// as keyword and counter predicates.
+/// as keyword and counter predicates. A base-P/T designation ("with base power
+/// and toughness 2/2", CR 208.4b — Duskana) contributes two conjoined props.
 fn parse_for_each_controlled_type_with_property(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, has_other) =
         opt(alt((value((), tag("other ")), value((), tag("another "))))).parse(input)?;
@@ -7008,13 +7009,13 @@ fn parse_for_each_controlled_type_with_property(input: &str) -> OracleResult<'_,
     // its own `with` dispatch token. Returning after the bare controller phrase
     // would otherwise leave the comparison suffix unconsumed.
     let (rest, _) = tag(" control ").parse(rest)?;
-    let (rest, property) = super::filter::parse_with_property(rest)?;
+    let (rest, with_props) = super::filter::parse_with_properties(rest)?;
 
     let mut properties = Vec::new();
     if has_other.is_some() {
         properties.push(FilterProp::Another);
     }
-    properties.push(property);
+    properties.extend(with_props);
 
     Ok((
         rest,
@@ -8550,6 +8551,36 @@ mod tests {
                 assert_eq!(tf.controller, Some(ControllerRef::You));
                 assert!(tf.properties.contains(&FilterProp::Another));
                 assert!(tf.properties.contains(&FilterProp::PowerExceedsBase));
+            }
+            other => panic!("expected ObjectCount(Typed), got {other:?}"),
+        }
+    }
+
+    /// CR 208.4b + CR 109.4: a base-P/T designation in the controller-scoped
+    /// for-each population contributes both exact base-scope props (Duskana,
+    /// the Rage Mother: "for each creature you control with base power and
+    /// toughness 2/2").
+    #[test]
+    fn parse_for_each_controlled_type_with_base_pt_designation() {
+        let (rest, q) =
+            parse_for_each_clause_ref("creature you control with base power and toughness 2/2")
+                .unwrap();
+        assert_eq!(rest, "");
+        let base_eq = |stat| FilterProp::PtComparison {
+            stat,
+            scope: crate::types::ability::PtValueScope::Base,
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Fixed { value: 2 },
+        };
+        match q {
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(tf),
+            } => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert_eq!(
+                    tf.properties,
+                    vec![base_eq(PtStat::Power), base_eq(PtStat::Toughness)]
+                );
             }
             other => panic!("expected ObjectCount(Typed), got {other:?}"),
         }
