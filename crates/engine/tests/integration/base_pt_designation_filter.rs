@@ -10,7 +10,7 @@
 //! wires: trigger subjects (CR 508.1m + CR 603.2 attack triggers, enter
 //! triggers), effect targets, for-each counts, and static subjects
 //! (CR 611.3a). "You control" binds to the ability source's controller
-//! (CR 109.4).
+//! (CR 109.5).
 //!
 //! Every runtime test drives the real pipeline: `DeclareAttackers` through
 //! `apply()` and trigger resolution, or a cast through `GameRunner::cast`. Every
@@ -98,7 +98,7 @@ fn has_base_pt(tf: &TypedFilter, power: i32, toughness: i32) -> bool {
             .contains(&base_eq(PtStat::Toughness, toughness))
 }
 
-/// R1 — CR 208.4b + CR 508.1m + CR 603.2: Duskana's attack trigger fires once
+/// R1 — CR 208.4b + CR 508.1m + CR 603.2c: Duskana's attack trigger fires once
 /// per attacking creature you control whose BASE P/T is 2/2 (counters ignored)
 /// and pumps that attacker.
 #[test]
@@ -125,7 +125,7 @@ fn duskana_attack_pumps_only_base_two_two_attackers() {
     let entries = attack(&mut runner, &[bear, grown, squirrel, ogre]);
     assert_eq!(
         entries, 2,
-        "CR 508.1m + CR 603.2: one trigger per attacker with base P/T 2/2 (Bear, Grown Bear)"
+        "CR 508.1m + CR 603.2c: one trigger per attacker with base P/T 2/2 (Bear, Grown Bear)"
     );
     assert_eq!(
         (
@@ -139,7 +139,7 @@ fn duskana_attack_pumps_only_base_two_two_attackers() {
     );
 }
 
-/// R2 — CR 109.4: "a creature you control" binds to the trigger source's
+/// R2 — CR 109.5: "a creature you control" binds to the trigger source's
 /// controller; the opponent's Duskana does not trigger on P0's attacker.
 #[test]
 fn duskana_you_control_scopes_to_trigger_controller() {
@@ -153,12 +153,12 @@ fn duskana_you_control_scopes_to_trigger_controller() {
     let entries = attack(&mut runner, &[bear]);
     assert_eq!(
         entries, 1,
-        "CR 109.4: only the attacking player's Duskana triggers"
+        "CR 109.5: only the attacking player's Duskana triggers"
     );
     assert_eq!(
         pt(&mut runner, bear),
         (5, 5),
-        "CR 109.4: one +3/+3, not one per Duskana"
+        "CR 109.5: one +3/+3, not one per Duskana"
     );
 }
 
@@ -183,7 +183,7 @@ fn duskana_reads_layer7b_set_base_pt_kudo() {
     assert_eq!(pt(&mut runner, ogre), (5, 5));
 }
 
-/// R4 — CR 208.4b + CR 109.4: Duskana's enter trigger draws one card per
+/// R4 — CR 208.4b + CR 109.5: Duskana's enter trigger draws one card per
 /// creature its controller controls with base P/T 2/2, counted at resolution.
 #[test]
 fn duskana_etb_draws_per_base_two_two_creature() {
@@ -210,7 +210,7 @@ fn duskana_etb_draws_per_base_two_two_creature() {
     assert_eq!(
         out.hand_drawn(P0),
         2,
-        "CR 208.4b + CR 109.4: Bear and Grown Bear (base 2/2 with a counter) count; \
+        "CR 208.4b + CR 109.5: Bear and Grown Bear (base 2/2 with a counter) count; \
          the base-1/1 Squirrel, the 3/3, Duskana itself and the opponent's 2/2 do not"
     );
 }
@@ -255,7 +255,7 @@ fn bess_enter_counts_only_base_one_one() {
     );
 }
 
-/// R5b — CR 208.4b + CR 613.4b: the entering creature's base P/T is read after
+/// R5b — CR 208.4b + CR 613.4b + CR 611.3c: the entering creature's base P/T is read after
 /// layer-7b setting effects. Under Kudo a printed 1/1 enters with base P/T 2/2,
 /// so Bess does not trigger; the first Soldier, cast before Kudo, does.
 #[test]
@@ -305,7 +305,7 @@ fn bess_enter_reads_layer7b_set_base_pt_of_entering_creature() {
     assert_eq!(
         plus_counters(&runner, bess),
         1,
-        "CR 208.4b: a creature entering with a layer-7b set base 2/2 does not trigger Bess"
+        "CR 208.4b + CR 611.3c: a creature entering with a layer-7b set base 2/2 does not trigger Bess"
     );
 }
 
@@ -338,7 +338,7 @@ fn bess_attack_pumps_only_base_one_one_others() {
             pt(&mut runner, enemy),
         ),
         ((3, 3), (4, 4), (2, 2), (1, 1)),
-        "CR 208.4b + CR 109.4: only your other base-1/1 creatures get +2/+2"
+        "CR 208.4b + CR 109.5: only your other base-1/1 creatures get +2/+2"
     );
 }
 
@@ -378,7 +378,7 @@ fn andrios_static_targets_tapped_base_four_three() {
             pt(&mut runner, grown),
         ),
         ((16, 9), (16, 9), (4, 3), (2, 2), (4, 3)),
-        "CR 208.4b + CR 613.4b: only tapped creatures you control with base 4/3 \
+        "CR 208.4b + CR 613.4b + CR 508.1f: only tapped creatures you control with base 4/3 \
          (Andrios, tapped by attacking, and the tapped 4/3) become 16/9"
     );
 }
