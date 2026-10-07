@@ -16,6 +16,7 @@
 //! `apply()` and trigger resolution, or a cast through `GameRunner::cast`. Every
 //! card uses its verbatim Oracle text.
 
+use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::drain_order_triggers_with_identity;
@@ -380,6 +381,84 @@ fn andrios_static_targets_tapped_base_four_three() {
         ((16, 9), (16, 9), (4, 3), (2, 2), (4, 3)),
         "CR 208.4b + CR 613.4b + CR 508.1f: only tapped creatures you control with base 4/3 \
          (Andrios, tapped by attacking, and the tapped 4/3) become 16/9"
+    );
+}
+
+/// R8 — CR 208.4b + CR 208.3: an Or type-disjunction's base-P/T designation
+/// binds whole to every creature disjunct; a base 2/3 creature satisfies neither
+/// leg. Synthetic text (no printed card has this shape — latent generic grammar,
+/// PR #9653 review). Reverting the whole-group distribution leaves the plain
+/// creature leg with base power only, so the base 2/3 Wall matches.
+#[test]
+fn or_disjunction_base_pt_designation_rejects_base_two_three() {
+    let parsed = parse_oracle_text(
+        "Destroy target creature or artifact creature with base power and toughness 2/2.",
+        "Designation Probe",
+        &[],
+        &["Instant".to_owned()],
+        &[],
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "no swallowed clause: {:?}",
+        parsed.parse_warnings
+    );
+    let target = parsed
+        .abilities
+        .iter()
+        .find_map(|a| match a.effect.as_ref() {
+            Effect::Destroy { target, .. } => Some(target.clone()),
+            _ => None,
+        })
+        .expect("a Destroy spell ability");
+    assert!(
+        matches!(target, TargetFilter::Or { .. }),
+        "expected an Or target, got {target:?}"
+    );
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let wall = scenario.add_creature(P0, "Wall", 2, 3).id();
+    let grown = scenario
+        .add_creature(P0, "Grown Bear", 2, 2)
+        .with_plus_counters(1)
+        .id();
+    let construct = scenario
+        .add_creature(P0, "Construct", 2, 2)
+        .as_artifact_creature()
+        .id();
+    let golem = scenario
+        .add_creature(P0, "Golem", 2, 3)
+        .as_artifact_creature()
+        .id();
+    let mut runner = scenario.build();
+
+    // Hostile guard: Grown Bear's CURRENT P/T is 3/3, its base P/T 2/2.
+    assert_eq!(pt(&mut runner, grown), (3, 3));
+
+    let state = runner.state();
+    let ctx = FilterContext::from_source(state, bear);
+    let matches = |id: ObjectId| matches_target_filter(state, id, &target, &ctx);
+    assert!(
+        matches(bear),
+        "CR 208.4b: a base 2/2 creature satisfies the creature leg"
+    );
+    assert!(
+        matches(grown),
+        "CR 208.4b: counters do not change base P/T, so base 2/2 still matches"
+    );
+    assert!(
+        matches(construct),
+        "CR 208.4b: a base 2/2 artifact creature satisfies the designation"
+    );
+    assert!(
+        !matches(wall),
+        "CR 208.4b: a base 2/3 creature must not satisfy base power and toughness 2/2"
+    );
+    assert!(
+        !matches(golem),
+        "CR 208.4b: a base 2/3 artifact creature must not satisfy base power and toughness 2/2"
     );
 }
 
