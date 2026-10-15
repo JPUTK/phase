@@ -114,7 +114,7 @@ import {
   isOfficialMultiplayerServerUrl,
 } from "../config/multiplayerServer";
 import { saveActiveGame, useGameStore } from "./gameStore";
-import { usePreferencesStore } from "./preferencesStore";
+import { usePreferencesStore, type AiDeckSelection } from "./preferencesStore";
 import {
   canAttemptNativeEngine,
   ensureNativeEngine,
@@ -189,6 +189,17 @@ function aiSeatDeckChoice(deckName: string | null): DeckChoice {
     return { type: "Random" };
   }
   return { type: "Named", data: deckName };
+}
+
+/** The wire shape of an AI seat for `CreateGameWithSettings`: client-only
+ *  fields such as `deckId` stay off the wire. */
+function aiSeatRequest(seat: AiSeatConfig) {
+  return {
+    seatIndex: seat.seatIndex,
+    difficulty: seat.difficulty,
+    deckName: seat.deckName,
+    ...(seat.deck ? { deck: seat.deck } : {}),
+  };
 }
 
 function effectiveAiSeats(settings: HostingSettings): AiSeatConfig[] {
@@ -1461,6 +1472,10 @@ export interface AiSeatConfig {
   difficulty: string;
   deckName: string | null;
   deck?: DeckChoice;
+  /** AI deck catalog id this seat plays (the Random sentinel is allowed in
+   *  host-form state). Used by the host form and the all-AI local start only;
+   *  it is never sent on the wire — `deck` carries the resolved decklist. */
+  deckId?: AiDeckSelection;
 }
 
 export interface HostingDeck {
@@ -2444,6 +2459,7 @@ function finalizeRememberedHostConfig(
         )
         || typeof seat.difficulty !== "string"
         || (typeof seat.deckName !== "string" && seat.deckName !== null)
+        || (seat.deckId !== undefined && typeof seat.deckId !== "string")
       ) {
         continue;
       }
@@ -2451,6 +2467,7 @@ function finalizeRememberedHostConfig(
         seatIndex: seat.seatIndex,
         difficulty: seat.difficulty,
         deckName: seat.deckName,
+        ...(seat.deckId !== undefined ? { deckId: seat.deckId } : {}),
       });
     }
   }
@@ -3162,7 +3179,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
                 loop_detection: settings.loopDetection,
               },
               format_config: settings.formatConfig,
-              ai_seats: aiSeats,
+              ai_seats: aiSeats.map(aiSeatRequest),
               room_name: settings.roomName,
               start_when_full: settings.startWhenFull,
               ranked: settings.ranked,

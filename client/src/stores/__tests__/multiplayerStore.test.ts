@@ -963,6 +963,25 @@ describe("multiplayerStore", () => {
     ]);
   });
 
+  it("round-trips a remembered AI seat's deckId and rejects a non-string one", () => {
+    seedSavedCustomFormat("saved-1");
+
+    const normalized = normalizeRememberedHostConfig(
+      persistedCustomHostConfig({
+        aiSeats: [
+          { seatIndex: 1, difficulty: "Hard", deckName: null, deckId: "Precon Deck" },
+          { seatIndex: 2, difficulty: "Easy", deckName: null, deckId: "Random" },
+          { seatIndex: 3, difficulty: "Easy", deckName: null, deckId: 7 },
+        ],
+      }),
+    );
+
+    expect(normalized?.aiSeats).toEqual([
+      { seatIndex: 1, difficulty: "Hard", deckName: null, deckId: "Precon Deck" },
+      { seatIndex: 2, difficulty: "Easy", deckName: null, deckId: "Random" },
+    ]);
+  });
+
   it("keeps a remembered custom config carrying the removed experimental-dungeons key", () => {
     seedSavedCustomFormat("saved-1");
     // Persisted before the flag was removed: every field plus the stale key.
@@ -1210,6 +1229,33 @@ describe("multiplayerStore", () => {
       data: { ai_seats: unknown[] };
     };
     expect(frame.data.ai_seats).toEqual(aiSeats);
+  });
+
+  it("sends each AI seat's resolved deck but never its client-only deckId", async () => {
+    const deck = { type: "DeckList" as const, data: { main_deck: ["Forest"], sideboard: [], commander: [] } };
+    useMultiplayerStore.getState().startHosting(
+      hostingSettings({
+        aiSeats: [
+          { seatIndex: 1, difficulty: "Hard", deckName: null, deckId: "Precon Deck", deck },
+          { seatIndex: 2, difficulty: "Easy", deckName: null, deckId: "Random" },
+        ],
+      }),
+      {
+        main_deck: ["Forest"],
+        sideboard: [],
+        commander: ["Goreclaw, Terror of Qal Sisma"],
+      },
+      HOST_URL,
+    );
+
+    await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+    const frame = JSON.parse(socketMocks.send.mock.calls[0][0] as string) as {
+      data: { ai_seats: unknown[] };
+    };
+    expect(frame.data.ai_seats).toEqual([
+      { seatIndex: 1, difficulty: "Hard", deckName: null, deck },
+      { seatIndex: 2, difficulty: "Easy", deckName: null },
+    ]);
   });
 
   it("saves server-host metadata with the reconnect token while waiting for players", async () => {

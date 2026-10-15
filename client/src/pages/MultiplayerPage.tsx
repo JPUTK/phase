@@ -71,6 +71,7 @@ import {
 import { assertNever } from "../utils/assertNever";
 import { useGameStore, saveActiveGame } from "../stores/gameStore";
 import { useCardDataStore } from "../stores/cardDataStore";
+import { AI_DECK_RANDOM } from "../stores/preferencesStore";
 import { useEffectiveOffline } from "../stores/connectivityStore";
 import type { HostSettings } from "../components/lobby/HostSetup";
 
@@ -662,8 +663,12 @@ function MultiplayerPageContent({
         if (allOpponentsAreAi) {
           const sortedAiSeats = [...action.settings.aiSeats]
             .sort((a, b) => a.seatIndex - b.seatIndex);
+          // The seat snapshot is what the local start reads: `deckId` null means
+          // Random, so the host form's per-seat deck (or Random) wins over the
+          // single-player preferences.
           const aiSeats = sortedAiSeats.map((seat) => ({
             difficulty: seat.difficulty,
+            deckId: seat.deckId && seat.deckId !== AI_DECK_RANDOM ? seat.deckId : null,
             deckName: seat.deckName,
           }));
           const headDifficulty = aiSeats[0]?.difficulty ?? "Medium";

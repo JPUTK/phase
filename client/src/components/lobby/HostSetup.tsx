@@ -30,6 +30,13 @@ import { refreshServerDirectory, type DirectorySource } from "../../services/ser
 import type { HostSeed } from "../../pages/multiplayerPageState";
 import { DEFAULT_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
+import {
+  candidatePassesFilters,
+  pickAiSeatDecks,
+  restrictAiPoolByBracket,
+} from "../../services/aiRandomPool";
+import { CEDH_DIFFICULTY } from "../../services/cedhLock";
+import { AI_DECK_RANDOM, usePreferencesStore, type AiDeckSelection } from "../../stores/preferencesStore";
 import { bestOfThreeCeilingForFormat } from "../../services/engineRuntime";
 import {
   deleteSavedCustomFormat,
@@ -40,6 +47,7 @@ import {
 import { getHostAdapter } from "../../adapter/wasm-adapter";
 import { isFormatConfigShape } from "../../adapter/format-config-shape";
 import { expandParsedDeck } from "../../services/deckParser";
+import { AiDeckPicker } from "../menu/AiDeckPicker";
 import { menuButtonClass } from "../menu/buttonStyles";
 import { PileSourceChoice } from "../menu/PileSourceChoice";
 import { DEFAULT_PILE_CHOICE, suppliedAiDeckChoice, type PileChoice } from "../../services/pileSource";
@@ -509,12 +517,14 @@ export function HostSetup({
     selectedFormat: formatConfig.format,
     selectedMatchType: effectiveMatchType,
   });
-  // A supplied-deck format's AI seats submit nothing, so no catalog deck is needed.
-  const defaultAiDeck = formatSuppliesDeck(formatConfig.format)
-    ? suppliedAiDeckChoice().choice
-    : aiDeckCatalog.candidates[0]
-      ? { type: "DeckList" as const, data: expandParsedDeck(aiDeckCatalog.candidates[0].deck) }
-      : null;
+  // A supplied-deck format's AI seats submit nothing, so no catalog deck is
+  // needed and no per-seat deck picker is shown.
+  const suppliesDeck = formatSuppliesDeck(formatConfig.format);
+  // Random seats draw from the player's single-player pool preferences; Host Game
+  // shows no filter controls of its own.
+  const aiArchetypeFilter = usePreferencesStore((s) => s.aiArchetypeFilter);
+  const aiCoverageFloor = usePreferencesStore((s) => s.aiCoverageFloor);
+  const aiBracketFilter = usePreferencesStore((s) => s.aiBracketFilter);
   const [pile, setPile] = useState<PileChoice>(DEFAULT_PILE_CHOICE);
   // A pile is picked for one format; any format change returns to the default pile.
   const [pileFormat, setPileFormat] = useState(formatConfig.format);
@@ -527,6 +537,25 @@ export function HostSetup({
   const aiSeatsSupported =
     seed === undefined && !formatConfig.team_based && formatConfig.format !== "Planechase";
   const effectiveAiSeats = aiSeatsSupported ? aiSeats : [];
+  // A remembered config can carry a CEDH seat; the table is then cEDH and its
+  // Random pool is restricted to bracket 5 (Commander formats only).
+  const hostCedh = effectiveAiSeats.some((s) => s.difficulty === CEDH_DIFFICULTY);
+  const aiRandomPool = useMemo(
+    () =>
+      restrictAiPoolByBracket(aiDeckCatalog.candidates, {
+        bracketFilter: aiBracketFilter,
+        cedhMode: hostCedh,
+        selectedFormat: formatConfig.format,
+      }).filter((d) => candidatePassesFilters(d, aiArchetypeFilter, aiCoverageFloor)),
+    [
+      aiDeckCatalog.candidates,
+      aiBracketFilter,
+      hostCedh,
+      formatConfig.format,
+      aiArchetypeFilter,
+      aiCoverageFloor,
+    ],
+  );
 
   // Mirror the in-flight format to the store on every change so sibling
   // views (the deck picker shown when the user clicks "Change Deck" out
@@ -721,14 +750,40 @@ export function HostSetup({
       if (existing) {
         return prev.filter((s) => s.seatIndex !== seatIndex);
       }
-      return [...prev, { seatIndex, difficulty: "Medium", deckName: null }];
+      return [...prev, { seatIndex, difficulty: "Medium", deckName: null, deckId: AI_DECK_RANDOM }];
     });
+  };
+
+  const setAiDeckId = (seatIndex: number, deckId: AiDeckSelection) => {
+    setAiSeats((prev) =>
+      prev.map((s) => (s.seatIndex === seatIndex ? { ...s, deckId } : s)),
+    );
   };
 
   const setAiDifficulty = (seatIndex: number, difficulty: string) => {
     setAiSeats((prev) =>
       prev.map((s) => (s.seatIndex === seatIndex ? { ...s, difficulty } : s)),
     );
+  };
+
+  /** Each AI seat paired with a concrete catalog deck: Random seats are drawn
+   *  from the single-player pool preferences, pinned seats keep their pick. */
+  const resolveCatalogAiSeats = (): AiSeatConfig[] => {
+    const ordered = [...effectiveAiSeats].sort((a, b) => a.seatIndex - b.seatIndex);
+    const picks = pickAiSeatDecks({
+      catalog: aiDeckCatalog.candidates,
+      requestedDeckIds: ordered.map((seat) => seat.deckId ?? AI_DECK_RANDOM),
+      archetypeFilter: aiArchetypeFilter,
+      coverageFloor: aiCoverageFloor,
+      bracketFilter: aiBracketFilter,
+      cedhMode: hostCedh,
+      selectedFormat: formatConfig.format,
+    });
+    return ordered.map((seat, i) => ({
+      ...seat,
+      deckId: picks[i].id,
+      deck: { type: "DeckList" as const, data: expandParsedDeck(picks[i].deck) },
+    }));
   };
 
   const handleHost = async () => {
@@ -745,6 +800,12 @@ export function HostSetup({
     // collapse the picker on re-entry. The live mirror effect above
     // keeps the store in sync with the format itself.
     const finalConfig = { ...formatConfig, max_players: playerCount };
+    // Resolve every seat to a concrete catalog deck here: the server's own
+    // Random draws from a different (starter-deck) pool, so Random must not
+    // reach it. Supplied-deck formats submit the empty supplied deck instead.
+    const submittedAiSeats: AiSeatConfig[] = suppliesDeck
+      ? effectiveAiSeats.map((seat) => ({ ...seat, deck: suppliedAiDeckChoice().choice }))
+      : resolveCatalogAiSeats();
     const trimmedRoomName = roomName.trim();
     // Default to the placeholder value when the field is blank so the
     // lobby title matches what the user was shown. Falls back to null
@@ -789,10 +850,7 @@ export function HostSetup({
           formatConfig: finalConfig,
           matchType: effectiveMatchType,
           loopDetection,
-          aiSeats: effectiveAiSeats.map((seat) => ({
-            ...seat,
-            ...(defaultAiDeck ? { deck: defaultAiDeck } : {}),
-          })),
+          aiSeats: submittedAiSeats,
           startWhenFull,
           ranked: false,
           roomName: resolvedRoomName,
@@ -914,7 +972,9 @@ export function HostSetup({
     || isSubmitting
     || isResolvingFormat
     || hostingStatus !== "idle"
-    || (effectiveAiSeats.length > 0 && !defaultAiDeck)
+    || (effectiveAiSeats.length > 0
+      && !suppliesDeck
+      && (aiDeckCatalog.loading || aiDeckCatalog.candidates.length === 0))
     || !pile.legal;
 
   return (
@@ -1332,38 +1392,50 @@ export function HostSetup({
                 {Array.from({ length: playerCount - 1 }, (_, i) => i + 1).map((seatIndex) => {
                   const aiSeat = effectiveAiSeats.find((s) => s.seatIndex === seatIndex);
                   return (
-                    <div key={seatIndex} className="flex items-center gap-2.5 rounded-[12px] border border-hairline bg-black/20 px-3 py-2">
-                      <span className="w-3.5 shrink-0 text-center font-mono text-[11px] text-fg-meta">{seatIndex + 1}</span>
-                      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[9px] border border-hairline bg-white/5 text-fg-meta">
-                        {aiSeat ? <BotGlyph /> : <HumanGlyph />}
-                      </span>
-                      {aiSeatsSupported && (
-                        <button
-                          type="button"
-                          onClick={() => toggleAiSeat(seatIndex)}
-                          className={`shrink-0 whitespace-nowrap rounded-badge px-2 py-0.5 text-[11px] font-semibold transition-colors ${
-                            aiSeat ? "bg-amber-500/20 text-amber-300" : "bg-cyan-500/20 text-cyan-300"
-                          }`}
-                        >
-                          {aiSeat ? t("hostSetup.ai") : t("hostSetup.human")}
-                        </button>
-                      )}
-                      {aiSeat ? (
-                        <MenuSelect
-                          ariaLabel={t("menu:aiDifficulty.label")}
-                          label={
-                            difficultyMenuItems.find((item) => item.value === aiSeat.difficulty)?.label ??
-                            t(`menu:aiDifficulty.levels.${aiSeat.difficulty}`)
-                          }
-                          selectedValue={aiSeat.difficulty}
-                          items={difficultyMenuItems}
-                          onSelect={(value) => setAiDifficulty(seatIndex, value)}
-                          menuLayout="dropdown"
-                          wrapperClassName="ml-auto min-w-0"
+                    <div key={seatIndex} className="flex flex-col gap-2 rounded-[12px] border border-hairline bg-black/20 px-3 py-2">
+                      <div className="flex items-center gap-2.5">
+                        <span className="w-3.5 shrink-0 text-center font-mono text-[11px] text-fg-meta">{seatIndex + 1}</span>
+                        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[9px] border border-hairline bg-white/5 text-fg-meta">
+                          {aiSeat ? <BotGlyph /> : <HumanGlyph />}
+                        </span>
+                        {aiSeatsSupported && (
+                          <button
+                            type="button"
+                            onClick={() => toggleAiSeat(seatIndex)}
+                            className={`shrink-0 whitespace-nowrap rounded-badge px-2 py-0.5 text-[11px] font-semibold transition-colors ${
+                              aiSeat ? "bg-amber-500/20 text-amber-300" : "bg-cyan-500/20 text-cyan-300"
+                            }`}
+                          >
+                            {aiSeat ? t("hostSetup.ai") : t("hostSetup.human")}
+                          </button>
+                        )}
+                        {aiSeat ? (
+                          <MenuSelect
+                            ariaLabel={t("menu:aiDifficulty.label")}
+                            label={
+                              difficultyMenuItems.find((item) => item.value === aiSeat.difficulty)?.label ??
+                              t(`menu:aiDifficulty.levels.${aiSeat.difficulty}`)
+                            }
+                            selectedValue={aiSeat.difficulty}
+                            items={difficultyMenuItems}
+                            onSelect={(value) => setAiDifficulty(seatIndex, value)}
+                            menuLayout="dropdown"
+                            wrapperClassName="ml-auto min-w-0"
+                            className="rounded-[8px] border border-hairline bg-black/30 px-1.5 py-1 text-[11px] font-medium text-white"
+                          />
+                        ) : (
+                          <span className="ml-auto text-[11px] text-fg-meta">{t("hostSetup.waitingForPlayer")}</span>
+                        )}
+                      </div>
+                      {aiSeat && !suppliesDeck && (
+                        <AiDeckPicker
+                          value={aiSeat.deckId ?? AI_DECK_RANDOM}
+                          candidates={aiDeckCatalog.candidates}
+                          randomPool={aiRandomPool}
+                          onChange={(deckId) => setAiDeckId(seatIndex, deckId)}
+                          wrapperClassName="w-full min-w-0"
                           className="rounded-[8px] border border-hairline bg-black/30 px-1.5 py-1 text-[11px] font-medium text-white"
                         />
-                      ) : (
-                        <span className="ml-auto text-[11px] text-fg-meta">{t("hostSetup.waitingForPlayer")}</span>
                       )}
                     </div>
                   );

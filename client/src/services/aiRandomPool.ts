@@ -1,7 +1,10 @@
 import type { GameFormat } from "../adapter/types";
 import type { CommanderBracket } from "../types/bracket";
 import { isCommanderFamilyFormat } from "../types/bracket";
+import { AI_DECK_RANDOM, type AiArchetypeFilter, type AiDeckSelection } from "../stores/preferencesStore";
+import type { AiDeckCandidate } from "./aiDeckCatalog";
 import { CEDH_BRACKET } from "./cedhLock";
+import { pickRandomDeckCandidate } from "./randomDeckSelection";
 
 /**
  * Minimal shape for AI random-pool filtering: anything carrying the resolved
@@ -47,4 +50,104 @@ export function restrictAiPoolByBracket<T extends BracketTaggedCandidate>(
   return candidates.filter(
     (candidate) => candidate.bracket !== null && options.bracketFilter.includes(candidate.bracket),
   );
+}
+
+/**
+ * Whether a candidate survives the Random-pool archetype + coverage filters.
+ * Candidates with unknown coverage or archetype are never excluded by the
+ * corresponding filter.
+ */
+export function candidatePassesFilters(
+  candidate: AiDeckCandidate,
+  archetypeFilter: AiArchetypeFilter,
+  coverageFloor: number,
+): boolean {
+  if (candidate.coveragePct != null && candidate.coveragePct < coverageFloor) return false;
+  return archetypeFilter === "Any" || !candidate.archetype || candidate.archetype === archetypeFilter;
+}
+
+/**
+ * Resolve one AI seat's deck. An explicit `requestedDeckId` is looked up in the
+ * full legal `catalog` (bypassing every filter); a Random or unknown id draws
+ * from `pool`.
+ */
+export function pickOpponentDeck(
+  catalog: AiDeckCandidate[],
+  pool: AiDeckCandidate[],
+  requestedDeckId: AiDeckSelection,
+  excludeIds: Set<string>,
+  archetypeFilter: AiArchetypeFilter,
+  coverageFloor: number,
+  selectedFormat?: GameFormat | null,
+): AiDeckCandidate {
+  if (requestedDeckId !== AI_DECK_RANDOM) {
+    const pinned = catalog.find((candidate) => candidate.id === requestedDeckId);
+    if (pinned) return pinned;
+  }
+
+  // Random seats draw from `pool`: the bracket-restricted pool when it is
+  // non-empty, else the full legal catalog (an empty restriction warns at
+  // setup, so reaching here means the fallback was accepted). Archetype +
+  // coverage are soft preferences applied within that pool.
+  const filtered = pool.filter((candidate) =>
+    candidatePassesFilters(candidate, archetypeFilter, coverageFloor)
+  );
+  return pickRandomDeckCandidate(filtered.length > 0 ? filtered : pool, {
+    selectedFormat,
+    excludeIds,
+  }) ?? catalog[0];
+}
+
+export interface PickAiSeatDecksOptions {
+  /** Full legal catalog for the table. Callers guarantee it is non-empty. */
+  catalog: AiDeckCandidate[];
+  /** One entry per AI seat, in seat order: a catalog id or `AI_DECK_RANDOM`. */
+  requestedDeckIds: readonly AiDeckSelection[];
+  archetypeFilter: AiArchetypeFilter;
+  coverageFloor: number;
+  bracketFilter: readonly CommanderBracket[];
+  cedhMode: boolean;
+  selectedFormat?: GameFormat | null;
+  /** Decks already taken at the table (e.g. a random player deck); Random seats
+   *  avoid them while alternatives exist. */
+  excludeIds?: Iterable<string>;
+}
+
+/**
+ * Assign a concrete catalog deck to every AI seat. The single authority shared
+ * by local game start (`GameProvider`) and the Host Game form, so both apply
+ * the same Random-pool rules:
+ *
+ * - Pinned seats resolve against the full legal catalog and bypass every filter.
+ * - Random seats draw from the bracket/cEDH-restricted pool (falling back to the
+ *   full catalog when that restriction matches nothing), narrowed by the
+ *   archetype + coverage preferences, and never repeat a deck already taken at
+ *   the table while alternatives exist.
+ */
+export function pickAiSeatDecks(options: PickAiSeatDecksOptions): AiDeckCandidate[] {
+  const {
+    catalog,
+    requestedDeckIds,
+    archetypeFilter,
+    coverageFloor,
+    bracketFilter,
+    cedhMode,
+    selectedFormat,
+  } = options;
+  const bracketPool = restrictAiPoolByBracket(catalog, { bracketFilter, cedhMode, selectedFormat });
+  const randomPool = bracketPool.length > 0 ? bracketPool : catalog;
+  const excludeIds = new Set<string>(options.excludeIds);
+  return requestedDeckIds.map((requestedDeckId) => {
+    const pick = pickOpponentDeck(
+      catalog,
+      randomPool,
+      requestedDeckId,
+      excludeIds,
+      archetypeFilter,
+      coverageFloor,
+      selectedFormat,
+    );
+    excludeIds.add(pick.id);
+    return pick;
+  });
 }
