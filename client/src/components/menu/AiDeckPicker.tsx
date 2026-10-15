@@ -8,11 +8,10 @@ import { MenuSelect } from "../ui/MenuSelect";
 interface AiDeckPickerProps {
   /** The seat's current selection: a catalog id or `AI_DECK_RANDOM`. */
   value: AiDeckSelection;
-  /** Every legal catalog deck — the options when a deck is pinned, so the seat
-   *  can switch between pinned decks. */
+  /** Every legal catalog deck — always listed as explicit options, so a seat can
+   *  pin any legal deck even when no preference filter leaves a Random pool. */
   candidates: AiDeckCandidate[];
-  /** The filtered Random pool — the options (and the "Random (N)" count) while
-   *  the seat is Random. */
+  /** The filtered Random pool — drives only the "Random (N)" count label. */
   randomPool: AiDeckCandidate[];
   onChange: (value: AiDeckSelection) => void;
   /** Trigger button classes. */
@@ -36,11 +35,9 @@ export function AiDeckPicker({
 }: AiDeckPickerProps) {
   const { t } = useTranslation("menu");
   const isRandom = value === AI_DECK_RANDOM;
-  // When the user has pinned a deck, expose the full list so they can switch
-  // to another pinned deck; otherwise scope to the filtered Random pool so
-  // the "Random" summary count matches the options shown.
-  const deckOptions = isRandom ? randomPool : candidates;
-  const selectionValid = isRandom || deckOptions.some((d) => d.id === value);
+  // Explicit pins always list the full legal catalog: the Random pool is a
+  // preference-filtered subset (possibly empty) and must not gate what can be pinned.
+  const selectionValid = isRandom || candidates.some((d) => d.id === value);
   const effectiveSelection: AiDeckSelection = selectionValid ? value : AI_DECK_RANDOM;
 
   const randomDeckLabel = t("aiOpponent.deckRandomCount", { count: randomPool.length });
@@ -67,9 +64,9 @@ export function AiDeckPicker({
     };
     return [
       { value: AI_DECK_RANDOM, label: randomDeckLabel },
-      ...deckOptions.map((d) => ({ value: d.id, label: formatDeckLabel(d) })),
+      ...candidates.map((d) => ({ value: d.id, label: formatDeckLabel(d) })),
     ];
-  }, [deckOptions, randomDeckLabel, t]);
+  }, [candidates, randomDeckLabel, t]);
   const selectedDeckLabel =
     effectiveSelection === AI_DECK_RANDOM
       ? randomDeckLabel

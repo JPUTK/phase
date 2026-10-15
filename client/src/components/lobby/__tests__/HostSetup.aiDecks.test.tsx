@@ -188,13 +188,13 @@ describe("HostSetup — per-seat AI decks", () => {
         seatIndex: 1,
         difficulty: "Medium",
         deckId: "Alpha",
-        deck: { type: "DeckList", data: expandParsedDeck(ALPHA.deck) },
+        deck: { type: "DeckList", data: { ...expandParsedDeck(ALPHA.deck), bracket_tier: "core" } },
       }),
       expect.objectContaining({
         seatIndex: 2,
         difficulty: "Hard",
         deckId: "Bravo",
-        deck: { type: "DeckList", data: expandParsedDeck(BRAVO.deck) },
+        deck: { type: "DeckList", data: { ...expandParsedDeck(BRAVO.deck), bracket_tier: "core" } },
       }),
     ]);
   });
@@ -214,7 +214,7 @@ describe("HostSetup — per-seat AI decks", () => {
     const decks = aiSeats.map((seat: { deck: { type: string; data: unknown } }) => seat.deck);
     for (const deck of decks) expect(deck.type).toBe("DeckList");
     expect(decks[0].data).not.toEqual(decks[1].data);
-    const catalogDecks = [ALPHA, BRAVO, CHARLIE].map((c) => expandParsedDeck(c.deck));
+    const catalogDecks = [ALPHA, BRAVO, CHARLIE].map((c) => ({ ...expandParsedDeck(c.deck), bracket_tier: "core" }));
     for (const deck of decks) expect(catalogDecks).toContainEqual(deck.data);
   });
 
@@ -233,13 +233,61 @@ describe("HostSetup — per-seat AI decks", () => {
     await user.click(screen.getByRole("button", { name: "Host Game" }));
 
     const { aiSeats } = onHost.mock.calls[0][0];
-    const poolDecks = [BRAVO, CHARLIE].map((c) => expandParsedDeck(c.deck));
+    const poolDecks = [BRAVO, CHARLIE].map((c) => ({ ...expandParsedDeck(c.deck), bracket_tier: "core" }));
     expect(aiSeats).toHaveLength(2);
     for (const seat of aiSeats) {
       expect(seat.deckId).toBe("Random");
       expect(poolDecks).toContainEqual(seat.deck.data);
     }
     expect(aiSeats[0].deck.data).not.toEqual(aiSeats[1].deck.data);
+  });
+
+  it("lists the full legal catalog for pinning when the Random pool is empty", async () => {
+    const user = userEvent.setup();
+    rememberTwoAiSeats();
+    // Every deck falls under the coverage floor, so the preference-filtered Random pool is empty.
+    catalogState.candidates = [candidate("Alpha", { coveragePct: 60 }), candidate("Bravo", { coveragePct: 70 })];
+    usePreferencesStore.getState().setAiCoverageFloor(90);
+    const onHost = renderHostSetup();
+
+    await waitFor(() => expect(deckPickers()).toHaveLength(2));
+    expect(deckPickers()[0]).toHaveTextContent("Random (0)");
+    await user.click(deckPickers()[0]);
+    expect(within(screen.getByRole("listbox")).getAllByRole("option").map((o) => o.textContent)).toEqual([
+      "Random (0)",
+      "Alpha — Precon · 60%",
+      "Bravo — Precon · 70%",
+    ]);
+    await user.click(screen.getByRole("option", { name: /^Bravo/ }));
+    await user.click(deckPickers()[1]);
+    await user.click(screen.getByRole("option", { name: /^Alpha/ }));
+    await user.click(screen.getByRole("button", { name: "Host Game" }));
+
+    const { aiSeats } = onHost.mock.calls[0][0];
+    expect(aiSeats[0].deckId).toBe("Bravo");
+    expect(aiSeats[0].deck.data).toEqual({
+      ...expandParsedDeck(candidate("Bravo").deck),
+      bracket_tier: "core",
+    });
+    expect(aiSeats[1].deckId).toBe("Alpha");
+  });
+
+  it("carries each picked deck's declared bracket tier onto the seat payload", async () => {
+    const user = userEvent.setup();
+    rememberTwoAiSeats();
+    catalogState.candidates = [candidate("Alpha", { bracket: 5 }), BRAVO];
+    const onHost = renderHostSetup();
+
+    await waitFor(() => expect(deckPickers()).toHaveLength(2));
+    await user.click(deckPickers()[0]);
+    await user.click(screen.getByRole("option", { name: /^Alpha/ }));
+    await user.click(deckPickers()[1]);
+    await user.click(screen.getByRole("option", { name: /^Bravo/ }));
+    await user.click(screen.getByRole("button", { name: "Host Game" }));
+
+    const { aiSeats } = onHost.mock.calls[0][0];
+    expect(aiSeats[0].deck.data.bracket_tier).toBe("cedh");
+    expect(aiSeats[1].deck.data.bracket_tier).toBe("core");
   });
 
   it("remembers the selection, not the resolved deck, so Random stays Random", async () => {

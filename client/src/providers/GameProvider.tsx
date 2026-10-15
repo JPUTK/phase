@@ -26,10 +26,10 @@ import {
   ACTIVE_DECK_KEY,
   isRandomDeckSelection,
   loadActiveDeck,
-  loadSavedDeckBracket,
+  loadActiveDeckBracket,
 } from "../constants/storage";
 import type { CommanderBracket } from "../types/bracket";
-import type { CommanderBracketTier } from "../types/bracketEstimate";
+import { bracketToEngineTier, type CommanderBracketTier } from "../types/bracketEstimate";
 import { buildLegalAiDeckCatalog } from "../services/aiDeckCatalog";
 import { pickRandomDeckCandidate } from "../services/randomDeckSelection";
 import { cedhRandomSeatUnservable, pickAiSeatDecks } from "../services/aiRandomPool";
@@ -245,37 +245,6 @@ function playerNamesRecordToMap(playerNames: Record<number, string>): Map<number
 
 function parsedDeckToDeckData(deck: ParsedDeck): DeckData {
   return expandParsedDeck(deck);
-}
-
-/**
- * Read the declared bracket for the currently active deck from localStorage.
- * Returns `null` when no deck is selected or the deck carries no bracket tag.
- * This is the sole call site for bracket → active-deck bridging so future
- * bracket storage changes only need to update this function.
- */
-function loadActiveDeckBracket(): CommanderBracket | null {
-  const name = localStorage.getItem(ACTIVE_DECK_KEY);
-  if (!name || isRandomDeckSelection(name)) return null;
-  return loadSavedDeckBracket(name);
-}
-
-/**
- * Convert the numeric `CommanderBracket` (1–5) stored on deck metadata into the
- * lowercase string tier the Rust engine expects on `PlayerDeckList.bracket_tier`.
- *
- * Uses the inverse of `BRACKET_TIER_NUMERIC` from `bracketEstimate.ts`.
- * Returns `"core"` (the engine's `Default`) for any unrecognised value so
- * that missing or invalid tags degrade safely.
- */
-function bracketToEngineTier(bracket: CommanderBracket | null | undefined): CommanderBracketTier {
-  switch (bracket) {
-    case 1: return "exhibition";
-    case 2: return "core";
-    case 3: return "upgraded";
-    case 4: return "optimized";
-    case 5: return "cedh";
-    default: return "core";
-  }
 }
 
 type ExpandedDeckWithTier = {

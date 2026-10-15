@@ -48,6 +48,7 @@ import {
 import { getHostAdapter } from "../../adapter/wasm-adapter";
 import { isFormatConfigShape } from "../../adapter/format-config-shape";
 import { expandParsedDeck } from "../../services/deckParser";
+import { bracketToEngineTier } from "../../types/bracketEstimate";
 import { AiDeckPicker } from "../menu/AiDeckPicker";
 import { menuButtonClass } from "../menu/buttonStyles";
 import { PileSourceChoice } from "../menu/PileSourceChoice";
@@ -799,7 +800,10 @@ export function HostSetup({
     return ordered.map((seat, i) => ({
       ...seat,
       deckId: requestedDeckIds[i],
-      deck: { type: "DeckList" as const, data: expandParsedDeck(picks[i].deck) },
+      deck: {
+        type: "DeckList" as const,
+        data: { ...expandParsedDeck(picks[i].deck), bracket_tier: bracketToEngineTier(picks[i].bracket) },
+      },
     }));
   };
 

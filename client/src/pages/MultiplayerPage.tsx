@@ -27,13 +27,20 @@ import { MenuParticles } from "../components/menu/MenuParticles";
 import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import { MyDecks } from "../components/menu/MyDecks";
-import { ACTIVE_DECK_KEY, loadActiveDeck, loadSavedDeck, touchDeckPlayed } from "../constants/storage";
+import {
+  ACTIVE_DECK_KEY,
+  loadActiveDeck,
+  loadActiveDeckBracket,
+  loadSavedDeck,
+  touchDeckPlayed,
+} from "../constants/storage";
 import { formatSuppliesDeck } from "../data/formatRegistry";
 import { DEFAULT_PILE_SOURCE, pileSeatDeck, pileSourceParam } from "../services/pileSource";
 import { withSavedDeckLibraryOrSkip } from "../services/savedDeckTransaction";
 import { parseRoomCode, stripPeerIdPrefix } from "../network/connection";
 import { evaluateDeckCompatibility } from "../services/deckCompatibility";
 import { expandParsedDeck, type ParsedDeck } from "../services/deckParser";
+import { bracketToEngineTier } from "../types/bracketEstimate";
 import type { ActionableBotLink, BotLink, HostSeed, LiveCheck, MultiplayerView } from "./multiplayerPageState";
 import {
   classifyCompatResult,
@@ -450,7 +457,7 @@ function MultiplayerPageContent({
   const expandDeck = useCallback(() => {
     const deck = loadActiveDeck();
     if (!deck) return null;
-    return expandParsedDeck(deck);
+    return { ...expandParsedDeck(deck), bracket_tier: bracketToEngineTier(loadActiveDeckBracket()) };
   }, []);
 
   // A supplied-deck format never reads the active deck: the host submits the pile seat's deck.

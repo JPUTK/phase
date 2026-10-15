@@ -10014,6 +10014,57 @@ mod tests {
         ));
     }
 
+    /// A host table built from the JSON the client emits for a cEDH table: the
+    /// host's `deck` and the AI seat's `DeckList` choice, each carrying
+    /// `bracket_tier` only when `bracket_tier` is `Some`. Returns the table's
+    /// session room after seating the AI at `CEDH` difficulty.
+    fn client_emitted_cedh_table(
+        db: &CardDatabase,
+        bracket_tier: Option<&str>,
+    ) -> (SessionManager, String) {
+        let mut deck = serde_json::json!({
+            "main_deck": vec!["Forest"; 40],
+            "sideboard": [],
+            "commander": [],
+            "planar_deck": [],
+            "scheme_deck": [],
+        });
+        if let Some(tier) = bracket_tier {
+            deck["bracket_tier"] = serde_json::json!(tier);
+        }
+        let host: crate::starter_decks::DeckData =
+            serde_json::from_value(deck.clone()).expect("the client's host deck shape parses");
+        let ai_choice: DeckChoice =
+            serde_json::from_value(serde_json::json!({ "type": "DeckList", "data": deck }))
+                .expect("the client's AI seat deck shape parses");
+        let (mut mgr, code) = hosted_room(db, &host);
+        install_ai_seat(&mut mgr, &code, db, AiDifficulty::CEDH, ai_choice, &host);
+        (mgr, code)
+    }
+
+    #[test]
+    fn a_client_emitted_cedh_table_passes_the_start_gate() {
+        let db = lands_db();
+        let (mgr, code) = client_emitted_cedh_table(&db, Some("cedh"));
+
+        assert_eq!(mgr.try_session(&code).unwrap().start_game(&db), Ok(()));
+    }
+
+    #[test]
+    fn a_client_emitted_table_without_a_declared_tier_is_refused_at_cedh() {
+        // Paired negative: the pre-fix payload omitted `bracket_tier`, which
+        // deserializes to Core, so the same table is refused.
+        let db = lands_db();
+        let (mgr, code) = client_emitted_cedh_table(&db, None);
+
+        assert!(matches!(
+            mgr.try_session(&code).unwrap().start_game(&db),
+            Err(StartGameError::Bracket(
+                CedhBracketError::DeckNotCedh { .. }
+            ))
+        ));
+    }
+
     #[test]
     fn a_restored_ai_seat_keeps_its_deck_and_its_choice() {
         let db = lands_db();

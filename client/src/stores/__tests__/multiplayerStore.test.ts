@@ -1258,6 +1258,46 @@ describe("multiplayerStore", () => {
     ]);
   });
 
+  it("sends the declared bracket tier on the host deck and each AI seat's deck", async () => {
+    const seatDeck = {
+      type: "DeckList" as const,
+      data: { main_deck: ["Forest"], sideboard: [], commander: [], bracket_tier: "cedh" as const },
+    };
+    useMultiplayerStore.getState().startHosting(
+      hostingSettings({
+        aiSeats: [{ seatIndex: 1, difficulty: "CEDH", deckName: null, deck: seatDeck }],
+      }),
+      { main_deck: ["Forest"], sideboard: [], commander: [], bracket_tier: "cedh" },
+      HOST_URL,
+    );
+
+    await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+    const frame = JSON.parse(socketMocks.send.mock.calls[0][0] as string) as {
+      type: string;
+      data: {
+        deck: { bracket_tier?: string };
+        ai_seats: { deck: { data: { bracket_tier?: string } } }[];
+      };
+    };
+    expect(frame.type).toBe("CreateGameWithSettings");
+    expect(frame.data.deck.bracket_tier).toBe("cedh");
+    expect(frame.data.ai_seats[0].deck.data.bracket_tier).toBe("cedh");
+  });
+
+  it("leaves the host deck's bracket tier off the frame when none is declared", async () => {
+    useMultiplayerStore.getState().startHosting(
+      hostingSettings(),
+      { main_deck: ["Forest"], sideboard: [], commander: [] },
+      HOST_URL,
+    );
+
+    await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+    const frame = JSON.parse(socketMocks.send.mock.calls[0][0] as string) as {
+      data: { deck: Record<string, unknown> };
+    };
+    expect(frame.data.deck).not.toHaveProperty("bracket_tier");
+  });
+
   it("saves server-host metadata with the reconnect token while waiting for players", async () => {
     useMultiplayerStore.getState().startHosting(
       hostingSettings(),
