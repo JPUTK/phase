@@ -209,6 +209,8 @@ describe("HostSetup — per-seat AI decks", () => {
     await user.click(screen.getByRole("button", { name: "Host Game" }));
 
     const { aiSeats } = onHost.mock.calls[0][0];
+    // The selection stays Random; only `deck` carries the concrete decklist.
+    expect(aiSeats.map((seat: { deckId: string }) => seat.deckId)).toEqual(["Random", "Random"]);
     const decks = aiSeats.map((seat: { deck: { type: string; data: unknown } }) => seat.deck);
     for (const deck of decks) expect(deck.type).toBe("DeckList");
     expect(decks[0].data).not.toEqual(decks[1].data);
@@ -231,7 +233,13 @@ describe("HostSetup — per-seat AI decks", () => {
     await user.click(screen.getByRole("button", { name: "Host Game" }));
 
     const { aiSeats } = onHost.mock.calls[0][0];
-    expect(aiSeats.map((seat: { deckId: string }) => seat.deckId).sort()).toEqual(["Bravo", "Charlie"]);
+    const poolDecks = [BRAVO, CHARLIE].map((c) => expandParsedDeck(c.deck));
+    expect(aiSeats).toHaveLength(2);
+    for (const seat of aiSeats) {
+      expect(seat.deckId).toBe("Random");
+      expect(poolDecks).toContainEqual(seat.deck.data);
+    }
+    expect(aiSeats[0].deck.data).not.toEqual(aiSeats[1].deck.data);
   });
 
   it("remembers the selection, not the resolved deck, so Random stays Random", async () => {
@@ -255,5 +263,47 @@ describe("HostSetup — per-seat AI decks", () => {
 
     await waitFor(() => expect(deckPickers()).toHaveLength(2));
     expect(screen.getByRole("button", { name: "Host Game" })).toBeDisabled();
+  });
+
+  describe("cEDH table", () => {
+    /** A Commander table with one remembered CEDH-difficulty AI seat on Random. */
+    function rememberCedhRandomSeat() {
+      useMultiplayerStore.setState({
+        lastHostConfig: {
+          format: "Commander",
+          formatConfig: FORMAT_DEFAULTS.Commander,
+          savedCustomFormatId: null,
+          playerCount: 2,
+          matchType: "Bo1",
+          loopDetection: { type: "Off" },
+          isPublic: true,
+          startWhenFull: true,
+          ranked: false,
+          aiSeats: [{ seatIndex: 1, difficulty: "CEDH", deckName: null }],
+        },
+      });
+    }
+
+    it("blocks hosting a Random seat when no bracket-5 deck exists", async () => {
+      rememberCedhRandomSeat();
+      catalogState.candidates = [candidate("Alpha", { bracket: 3 }), candidate("Bravo", { bracket: 4 })];
+      renderHostSetup();
+
+      await waitFor(() => expect(deckPickers()).toHaveLength(1));
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "No bracket-5 decks available. Random AI seats cannot be filled.",
+      );
+      expect(screen.getByRole("button", { name: "Host Game" })).toBeDisabled();
+    });
+
+    it("allows hosting once the catalog holds a bracket-5 deck", async () => {
+      rememberCedhRandomSeat();
+      catalogState.candidates = [candidate("Alpha", { bracket: 3 }), candidate("Bravo", { bracket: 5 })];
+      renderHostSetup();
+
+      await waitFor(() => expect(deckPickers()).toHaveLength(1));
+      expect(screen.queryByRole("status")).toBeNull();
+      expect(screen.getByRole("button", { name: "Host Game" })).toBeEnabled();
+    });
   });
 });

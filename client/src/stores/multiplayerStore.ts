@@ -1472,9 +1472,10 @@ export interface AiSeatConfig {
   difficulty: string;
   deckName: string | null;
   deck?: DeckChoice;
-  /** AI deck catalog id this seat plays (the Random sentinel is allowed in
-   *  host-form state). Used by the host form and the all-AI local start only;
-   *  it is never sent on the wire — `deck` carries the resolved decklist. */
+  /** The seat's deck selection: an AI deck catalog id, or the Random sentinel
+   *  (which stays Random even after `deck` is resolved). Used by the host form and
+   *  the all-AI local start only; it is never sent on the wire — `deck` carries
+   *  the concrete decklist. */
   deckId?: AiDeckSelection;
 }
 

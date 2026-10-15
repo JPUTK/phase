@@ -98,6 +98,35 @@ export function pickOpponentDeck(
   }) ?? catalog[0];
 }
 
+export interface CedhRandomSeatUnservableOptions {
+  /** Full legal catalog for the table. */
+  catalog: AiDeckCandidate[];
+  /** One entry per AI seat: a catalog id or `AI_DECK_RANDOM`. */
+  requestedDeckIds: readonly AiDeckSelection[];
+  bracketFilter: readonly CommanderBracket[];
+  cedhMode: boolean;
+  selectedFormat?: GameFormat | null;
+}
+
+/**
+ * Whether a cEDH table has an AI seat that no legal deck can serve: the table is
+ * cEDH (Commander family only), the bracket-restricted pool is empty, and some
+ * seat is Random or pinned to an id missing from `catalog`. Random would then
+ * fall back to a non-bracket-5 deck, which the engine's cEDH bracket gate
+ * rejects at init, so callers must refuse to start. Archetype and coverage
+ * filters are soft preferences and deliberately play no part here.
+ */
+export function cedhRandomSeatUnservable(options: CedhRandomSeatUnservableOptions): boolean {
+  const { catalog, requestedDeckIds, bracketFilter, cedhMode, selectedFormat } = options;
+  if (!cedhMode || !isCommanderFamilyFormat(selectedFormat ?? undefined)) return false;
+  if (restrictAiPoolByBracket(catalog, { bracketFilter, cedhMode, selectedFormat }).length > 0) {
+    return false;
+  }
+  return requestedDeckIds.some((requestedDeckId) =>
+    requestedDeckId === AI_DECK_RANDOM || !catalog.some((candidate) => candidate.id === requestedDeckId),
+  );
+}
+
 export interface PickAiSeatDecksOptions {
   /** Full legal catalog for the table. Callers guarantee it is non-empty. */
   catalog: AiDeckCandidate[];

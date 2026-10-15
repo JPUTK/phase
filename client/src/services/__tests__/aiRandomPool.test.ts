@@ -5,6 +5,7 @@ import { AI_DECK_RANDOM } from "../../stores/preferencesStore";
 import type { AiDeckCandidate } from "../aiDeckCatalog";
 import {
   candidatePassesFilters,
+  cedhRandomSeatUnservable,
   pickAiSeatDecks,
   restrictAiPoolByBracket,
   type BracketTaggedCandidate,
@@ -224,5 +225,59 @@ describe("pickAiSeatDecks", () => {
   it("treats an unknown pinned id as Random", () => {
     const catalog = [deck("a", { coveragePct: 95 }), deck("b", { coveragePct: 55 })];
     expect(pick(catalog, ["gone"], { coverageFloor: 90 })).toEqual(["a"]);
+  });
+});
+
+describe("cedhRandomSeatUnservable", () => {
+  const noBracketFive = [deck("b2", { bracket: 2 }), deck("b4", { bracket: 4 })];
+
+  function unservable(
+    catalog: AiDeckCandidate[],
+    requestedDeckIds: string[],
+    overrides: Partial<Parameters<typeof cedhRandomSeatUnservable>[0]> = {},
+  ): boolean {
+    return cedhRandomSeatUnservable({
+      catalog,
+      requestedDeckIds,
+      bracketFilter: [],
+      cedhMode: true,
+      selectedFormat: "Commander",
+      ...overrides,
+    });
+  }
+
+  it("is true for a Random seat at a cEDH table with no bracket-5 deck", () => {
+    expect(unservable(noBracketFive, [AI_DECK_RANDOM])).toBe(true);
+    expect(unservable(noBracketFive, ["b2", AI_DECK_RANDOM])).toBe(true);
+  });
+
+  it("treats a pinned id missing from the catalog like Random", () => {
+    expect(unservable(noBracketFive, ["gone"])).toBe(true);
+  });
+
+  it("is false when every seat is pinned to a catalog deck", () => {
+    expect(unservable(noBracketFive, ["b2", "b4"])).toBe(false);
+  });
+
+  it("is false when the bracket-5 pool is non-empty", () => {
+    const catalog = [...noBracketFive, deck("cedh", { bracket: 5 })];
+    expect(unservable(catalog, [AI_DECK_RANDOM])).toBe(false);
+  });
+
+  it("is false outside cEDH mode and outside the Commander family", () => {
+    expect(unservable(noBracketFive, [AI_DECK_RANDOM], { cedhMode: false })).toBe(false);
+    expect(unservable(noBracketFive, [AI_DECK_RANDOM], { selectedFormat: "Standard" })).toBe(false);
+    expect(unservable(noBracketFive, [AI_DECK_RANDOM], { selectedFormat: null })).toBe(false);
+  });
+
+  it("ignores the manual bracket selection, which cEDH mode overrides", () => {
+    expect(unservable(noBracketFive, [AI_DECK_RANDOM], { bracketFilter: [2] })).toBe(true);
+  });
+
+  it("is unaffected by archetype and coverage, which the predicate does not take", () => {
+    // A bracket-5 deck that the soft archetype/coverage filters would exclude
+    // still keeps the bracket pool non-empty.
+    const catalog = [deck("cedh", { bracket: 5, coveragePct: 1, archetype: "Aggro" })];
+    expect(unservable(catalog, [AI_DECK_RANDOM])).toBe(false);
   });
 });

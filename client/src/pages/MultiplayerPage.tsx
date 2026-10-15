@@ -663,9 +663,10 @@ function MultiplayerPageContent({
         if (allOpponentsAreAi) {
           const sortedAiSeats = [...action.settings.aiSeats]
             .sort((a, b) => a.seatIndex - b.seatIndex);
-          // The seat snapshot is what the local start reads: `deckId` null means
-          // Random, so the host form's per-seat deck (or Random) wins over the
-          // single-player preferences.
+          // The seat snapshot is what the local start reads: `deckId` is the
+          // seat's selection (a catalog id, or null for Random), so the host
+          // form's per-seat deck (or Random) wins over the single-player
+          // preferences and Random is drawn by the local start itself.
           const aiSeats = sortedAiSeats.map((seat) => ({
             difficulty: seat.difficulty,
             deckId: seat.deckId && seat.deckId !== AI_DECK_RANDOM ? seat.deckId : null,

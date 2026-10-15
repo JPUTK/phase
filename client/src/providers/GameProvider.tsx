@@ -28,11 +28,11 @@ import {
   loadActiveDeck,
   loadSavedDeckBracket,
 } from "../constants/storage";
-import { isCommanderFamilyFormat, type CommanderBracket } from "../types/bracket";
+import type { CommanderBracket } from "../types/bracket";
 import type { CommanderBracketTier } from "../types/bracketEstimate";
 import { buildLegalAiDeckCatalog } from "../services/aiDeckCatalog";
 import { pickRandomDeckCandidate } from "../services/randomDeckSelection";
-import { pickAiSeatDecks, restrictAiPoolByBracket } from "../services/aiRandomPool";
+import { cedhRandomSeatUnservable, pickAiSeatDecks } from "../services/aiRandomPool";
 import { resolveLocalAiSeatPlan, type LocalAiSeatPlan } from "../services/localAiSeatPlan";
 import { AI_DECK_RANDOM, usePreferencesStore } from "../stores/preferencesStore";
 import { CEDH_DIFFICULTY, effectiveAiDifficulty } from "../services/cedhLock";
@@ -439,11 +439,6 @@ async function buildLocalAiDeckList(
   // can never field a bracket-4+ deck. Pinned seats bypass the pool —
   // `pickAiSeatDecks` resolves explicit ids against the full catalog.
   const requestedDeckIds = seats.map((seat) => seat.deckId);
-  const bracketPool = restrictAiPoolByBracket(catalog.candidates, {
-    bracketFilter: aiBracketFilter,
-    cedhMode: tableCedh,
-    selectedFormat: formatConfig?.format ?? null,
-  });
   // An empty pool means the table's bracket constraint excluded every legal
   // deck (the catalog itself is non-empty here). In cEDH mode the engine
   // rejects any non-bracket-5 deck at init (`validate_cedh_bracket`, gated
@@ -452,18 +447,20 @@ async function buildLocalAiDeckList(
   // filter) any legal deck plays fine — the setup page warns about the
   // empty pool (soft gate, Start stays enabled), so fall back to the full
   // legal catalog.
-  const effectiveCedhMode = tableCedh && isCommanderFamilyFormat(formatConfig?.format ?? undefined);
-  if (bracketPool.length === 0 && effectiveCedhMode) {
-    const needsRandomSeat = requestedDeckIds.some((requestedDeckId) =>
-      requestedDeckId === AI_DECK_RANDOM || !catalog.candidates.some((c) => c.id === requestedDeckId),
+  if (
+    cedhRandomSeatUnservable({
+      catalog: catalog.candidates,
+      requestedDeckIds,
+      bracketFilter: aiBracketFilter,
+      cedhMode: tableCedh,
+      selectedFormat: formatConfig?.format ?? null,
+    })
+  ) {
+    throw new Error(
+      formatConfig?.format
+        ? t("gameProvider.noLegalAiDecks.withFormat", { format: formatConfig.format })
+        : t("gameProvider.noLegalAiDecks.generic"),
     );
-    if (needsRandomSeat) {
-      throw new Error(
-        formatConfig?.format
-          ? t("gameProvider.noLegalAiDecks.withFormat", { format: formatConfig.format })
-          : t("gameProvider.noLegalAiDecks.generic"),
-      );
-    }
   }
 
   const excludeIds = new Set<string>();

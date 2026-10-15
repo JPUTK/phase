@@ -32,6 +32,7 @@ import { DEFAULT_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import {
   candidatePassesFilters,
+  cedhRandomSeatUnservable,
   pickAiSeatDecks,
   restrictAiPoolByBracket,
 } from "../../services/aiRandomPool";
@@ -556,6 +557,19 @@ export function HostSetup({
       aiCoverageFloor,
     ],
   );
+  // A cEDH table whose bracket-5 pool is empty cannot field a Random (or
+  // unknown-id) seat: the engine would reject the fallback deck, so block hosting.
+  const cedhPoolBlocksHost =
+    effectiveAiSeats.length > 0
+    && !suppliesDeck
+    && !aiDeckCatalog.loading
+    && cedhRandomSeatUnservable({
+      catalog: aiDeckCatalog.candidates,
+      requestedDeckIds: effectiveAiSeats.map((s) => s.deckId ?? AI_DECK_RANDOM),
+      bracketFilter: aiBracketFilter,
+      cedhMode: hostCedh,
+      selectedFormat: formatConfig.format,
+    });
 
   // Mirror the in-flight format to the store on every change so sibling
   // views (the deck picker shown when the user clicks "Change Deck" out
@@ -766,13 +780,16 @@ export function HostSetup({
     );
   };
 
-  /** Each AI seat paired with a concrete catalog deck: Random seats are drawn
-   *  from the single-player pool preferences, pinned seats keep their pick. */
+  /** Each AI seat paired with a concrete catalog decklist: Random seats are drawn
+   *  from the single-player pool preferences, pinned seats keep their pick. The
+   *  seat's `deckId` stays the user's selection (Random remains Random) so the
+   *  all-AI local start can still apply its own Random draw and cEDH fail-fast. */
   const resolveCatalogAiSeats = (): AiSeatConfig[] => {
     const ordered = [...effectiveAiSeats].sort((a, b) => a.seatIndex - b.seatIndex);
+    const requestedDeckIds = ordered.map((seat) => seat.deckId ?? AI_DECK_RANDOM);
     const picks = pickAiSeatDecks({
       catalog: aiDeckCatalog.candidates,
-      requestedDeckIds: ordered.map((seat) => seat.deckId ?? AI_DECK_RANDOM),
+      requestedDeckIds,
       archetypeFilter: aiArchetypeFilter,
       coverageFloor: aiCoverageFloor,
       bracketFilter: aiBracketFilter,
@@ -781,7 +798,7 @@ export function HostSetup({
     });
     return ordered.map((seat, i) => ({
       ...seat,
-      deckId: picks[i].id,
+      deckId: requestedDeckIds[i],
       deck: { type: "DeckList" as const, data: expandParsedDeck(picks[i].deck) },
     }));
   };
@@ -975,6 +992,7 @@ export function HostSetup({
     || (effectiveAiSeats.length > 0
       && !suppliesDeck
       && (aiDeckCatalog.loading || aiDeckCatalog.candidates.length === 0))
+    || cedhPoolBlocksHost
     || !pile.legal;
 
   return (
@@ -1441,6 +1459,11 @@ export function HostSetup({
                   );
                 })}
               </div>
+              {cedhPoolBlocksHost && (
+                <p role="status" className="mt-3 text-xs text-amber-300">
+                  {t("menu:aiOpponent.cedhPoolEmpty")}
+                </p>
+              )}
             </div>
           )}
 
