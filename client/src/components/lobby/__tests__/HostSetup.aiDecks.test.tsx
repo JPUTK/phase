@@ -314,8 +314,8 @@ describe("HostSetup — per-seat AI decks", () => {
   });
 
   describe("cEDH table", () => {
-    /** A Commander table with one remembered CEDH-difficulty AI seat on Random. */
-    function rememberCedhRandomSeat() {
+    /** A Commander table with one remembered CEDH-difficulty AI seat, on Random unless pinned. */
+    function rememberCedhRandomSeat(deckId?: string) {
       useMultiplayerStore.setState({
         lastHostConfig: {
           format: "Commander",
@@ -327,7 +327,7 @@ describe("HostSetup — per-seat AI decks", () => {
           isPublic: true,
           startWhenFull: true,
           ranked: false,
-          aiSeats: [{ seatIndex: 1, difficulty: "CEDH", deckName: null }],
+          aiSeats: [{ seatIndex: 1, difficulty: "CEDH", deckName: null, deckId }],
         },
       });
     }
@@ -350,6 +350,30 @@ describe("HostSetup — per-seat AI decks", () => {
       renderHostSetup();
 
       await waitFor(() => expect(deckPickers()).toHaveLength(1));
+      expect(screen.queryByRole("status")).toBeNull();
+      expect(screen.getByRole("button", { name: "Host Game" })).toBeEnabled();
+    });
+
+    it("blocks hosting a seat pinned to a non-bracket-5 deck", async () => {
+      rememberCedhRandomSeat("Alpha");
+      catalogState.candidates = [candidate("Alpha", { bracket: 4 }), candidate("Bravo", { bracket: 5 })];
+      renderHostSetup();
+
+      await waitFor(() => expect(deckPickers()).toHaveLength(1));
+      expect(deckPickers()[0]).toHaveTextContent("Alpha");
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "All opponents play cEDH. Every deck must be bracket 5.",
+      );
+      expect(screen.getByRole("button", { name: "Host Game" })).toBeDisabled();
+    });
+
+    it("allows hosting a seat pinned to a bracket-5 deck", async () => {
+      rememberCedhRandomSeat("Bravo");
+      catalogState.candidates = [candidate("Alpha", { bracket: 4 }), candidate("Bravo", { bracket: 5 })];
+      renderHostSetup();
+
+      await waitFor(() => expect(deckPickers()).toHaveLength(1));
+      expect(deckPickers()[0]).toHaveTextContent("Bravo");
       expect(screen.queryByRole("status")).toBeNull();
       expect(screen.getByRole("button", { name: "Host Game" })).toBeEnabled();
     });

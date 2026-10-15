@@ -32,7 +32,7 @@ import type { CommanderBracket } from "../types/bracket";
 import { bracketToEngineTier, type CommanderBracketTier } from "../types/bracketEstimate";
 import { buildLegalAiDeckCatalog } from "../services/aiDeckCatalog";
 import { pickRandomDeckCandidate } from "../services/randomDeckSelection";
-import { cedhRandomSeatUnservable, pickAiSeatDecks } from "../services/aiRandomPool";
+import { cedhSeatProblem, pickAiSeatDecks } from "../services/aiRandomPool";
 import { resolveLocalAiSeatPlan, type LocalAiSeatPlan } from "../services/localAiSeatPlan";
 import { AI_DECK_RANDOM, usePreferencesStore } from "../stores/preferencesStore";
 import { CEDH_DIFFICULTY, effectiveAiDifficulty } from "../services/cedhLock";
@@ -416,14 +416,16 @@ async function buildLocalAiDeckList(
   // filter) any legal deck plays fine — the setup page warns about the
   // empty pool (soft gate, Start stays enabled), so fall back to the full
   // legal catalog.
+  // A pinned non-bracket-5 deck (`PinnedDeckNotCedh`) is left to the engine's own
+  // cEDH bracket gate at init, which reports the specific bracket error.
   if (
-    cedhRandomSeatUnservable({
+    cedhSeatProblem({
       catalog: catalog.candidates,
       requestedDeckIds,
       bracketFilter: aiBracketFilter,
       cedhMode: tableCedh,
       selectedFormat: formatConfig?.format ?? null,
-    })
+    }) === "NoCedhDeckForRandom"
   ) {
     throw new Error(
       formatConfig?.format

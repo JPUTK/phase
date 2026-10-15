@@ -98,7 +98,7 @@ export function pickOpponentDeck(
   }) ?? catalog[0];
 }
 
-export interface CedhRandomSeatUnservableOptions {
+export interface CedhSeatProblemOptions {
   /** Full legal catalog for the table. */
   catalog: AiDeckCandidate[];
   /** One entry per AI seat: a catalog id or `AI_DECK_RANDOM`. */
@@ -108,23 +108,38 @@ export interface CedhRandomSeatUnservableOptions {
   selectedFormat?: GameFormat | null;
 }
 
+/** Why a cEDH table's AI seats cannot all be served a bracket-5 deck. */
+export type CedhSeatProblem = "PinnedDeckNotCedh" | "NoCedhDeckForRandom";
+
 /**
- * Whether a cEDH table has an AI seat that no legal deck can serve: the table is
- * cEDH (Commander family only), the bracket-restricted pool is empty, and some
- * seat is Random or pinned to an id missing from `catalog`. Random would then
- * fall back to a non-bracket-5 deck, which the engine's cEDH bracket gate
- * rejects at init, so callers must refuse to start. Archetype and coverage
- * filters are soft preferences and deliberately play no part here.
+ * The first reason a cEDH table (Commander family only) has an AI seat that no
+ * legal deck can serve, or `null` when every seat can be served. The engine's
+ * cEDH bracket gate refuses any non-bracket-5 deck at init, so callers must
+ * refuse to start on a non-null result:
+ *
+ * - `PinnedDeckNotCedh`: a seat is pinned to a catalog deck that is not
+ *   bracket 5. Pinned seats bypass the Random pool, so the deck would reach the
+ *   gate unchanged and be refused.
+ * - `NoCedhDeckForRandom`: the bracket-restricted pool is empty and some seat is
+ *   Random or pinned to an id missing from `catalog`. Random would fall back to
+ *   a non-bracket-5 deck.
+ *
+ * Archetype and coverage filters are soft preferences and play no part here.
  */
-export function cedhRandomSeatUnservable(options: CedhRandomSeatUnservableOptions): boolean {
+export function cedhSeatProblem(options: CedhSeatProblemOptions): CedhSeatProblem | null {
   const { catalog, requestedDeckIds, bracketFilter, cedhMode, selectedFormat } = options;
-  if (!cedhMode || !isCommanderFamilyFormat(selectedFormat ?? undefined)) return false;
+  if (!cedhMode || !isCommanderFamilyFormat(selectedFormat ?? undefined)) return null;
+  const pinnedNonCedh = requestedDeckIds.some((requestedDeckId) =>
+    catalog.some((candidate) => candidate.id === requestedDeckId && candidate.bracket !== CEDH_BRACKET),
+  );
+  if (pinnedNonCedh) return "PinnedDeckNotCedh";
   if (restrictAiPoolByBracket(catalog, { bracketFilter, cedhMode, selectedFormat }).length > 0) {
-    return false;
+    return null;
   }
-  return requestedDeckIds.some((requestedDeckId) =>
+  const randomUnservable = requestedDeckIds.some((requestedDeckId) =>
     requestedDeckId === AI_DECK_RANDOM || !catalog.some((candidate) => candidate.id === requestedDeckId),
   );
+  return randomUnservable ? "NoCedhDeckForRandom" : null;
 }
 
 export interface PickAiSeatDecksOptions {

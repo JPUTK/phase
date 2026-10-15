@@ -32,8 +32,9 @@ import { DEFAULT_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import {
   candidatePassesFilters,
-  cedhRandomSeatUnservable,
+  cedhSeatProblem,
   pickAiSeatDecks,
+  type CedhSeatProblem,
   restrictAiPoolByBracket,
 } from "../../services/aiRandomPool";
 import { CEDH_DIFFICULTY } from "../../services/cedhLock";
@@ -183,6 +184,12 @@ function hostRejection(listing: DirectorySource | null): string | null {
  * scales linearly. The ceiling here matches the engine's Free-for-All maximum
  * (`format.rs` `free_for_all`, max_players 6) rather than a transport limit. */
 const P2P_MAX_PEERS = 6;
+
+/** Status message per reason a cEDH table's AI seats cannot be served. */
+const CEDH_SEAT_PROBLEM_KEYS = {
+  NoCedhDeckForRandom: "menu:aiOpponent.cedhPoolEmpty",
+  PinnedDeckNotCedh: "menu:aiOpponent.cedhToggle.hint",
+} as const satisfies Record<CedhSeatProblem, string>;
 
 /** Uppercase field label + optional hint wrapper (mirrors the design mockup's
  *  Host-setup `Field`). Pure presentation. */
@@ -558,19 +565,19 @@ export function HostSetup({
       aiCoverageFloor,
     ],
   );
-  // A cEDH table whose bracket-5 pool is empty cannot field a Random (or
-  // unknown-id) seat: the engine would reject the fallback deck, so block hosting.
-  const cedhPoolBlocksHost =
-    effectiveAiSeats.length > 0
-    && !suppliesDeck
-    && !aiDeckCatalog.loading
-    && cedhRandomSeatUnservable({
-      catalog: aiDeckCatalog.candidates,
-      requestedDeckIds: effectiveAiSeats.map((s) => s.deckId ?? AI_DECK_RANDOM),
-      bracketFilter: aiBracketFilter,
-      cedhMode: hostCedh,
-      selectedFormat: formatConfig.format,
-    });
+  // A cEDH table with an AI seat no bracket-5 deck can serve (a Random seat over
+  // an empty bracket-5 pool, or a seat pinned to a non-bracket-5 deck) would be
+  // refused by the engine's bracket gate, so block hosting.
+  const cedhSeatProblemForHost: CedhSeatProblem | null =
+    effectiveAiSeats.length > 0 && !suppliesDeck && !aiDeckCatalog.loading
+      ? cedhSeatProblem({
+          catalog: aiDeckCatalog.candidates,
+          requestedDeckIds: effectiveAiSeats.map((s) => s.deckId ?? AI_DECK_RANDOM),
+          bracketFilter: aiBracketFilter,
+          cedhMode: hostCedh,
+          selectedFormat: formatConfig.format,
+        })
+      : null;
 
   // Mirror the in-flight format to the store on every change so sibling
   // views (the deck picker shown when the user clicks "Change Deck" out
@@ -996,7 +1003,7 @@ export function HostSetup({
     || (effectiveAiSeats.length > 0
       && !suppliesDeck
       && (aiDeckCatalog.loading || aiDeckCatalog.candidates.length === 0))
-    || cedhPoolBlocksHost
+    || cedhSeatProblemForHost !== null
     || !pile.legal;
 
   return (
@@ -1463,9 +1470,9 @@ export function HostSetup({
                   );
                 })}
               </div>
-              {cedhPoolBlocksHost && (
+              {cedhSeatProblemForHost !== null && (
                 <p role="status" className="mt-3 text-xs text-amber-300">
-                  {t("menu:aiOpponent.cedhPoolEmpty")}
+                  {t(CEDH_SEAT_PROBLEM_KEYS[cedhSeatProblemForHost])}
                 </p>
               )}
             </div>
