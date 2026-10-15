@@ -1154,7 +1154,12 @@ export function GameProvider({
       const parsedDeck = isSpectate ? null : loadActiveDeck();
       // A guest of a supplied-deck room submits nothing; the room's format rides the join URL.
       const suppliedJoin = Boolean(joinCode) && formatConfig !== undefined && formatSuppliesDeck(formatConfig.format);
-      const deck = parsedDeck && !suppliedJoin ? parsedDeckToDeckData(parsedDeck) : emptySeatDeck();
+      const deck = parsedDeck && !suppliedJoin
+        ? {
+            ...parsedDeckToDeckData(parsedDeck),
+            bracket_tier: bracketToEngineTier(loadActiveDeckBracket()),
+          }
+        : emptySeatDeck();
 
       const mpStore = useMultiplayerStore.getState();
       mpStore.setConnectionStatus("connecting");
