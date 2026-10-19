@@ -10,7 +10,10 @@ use engine::game::printed_cards::intrinsic_copiable_values;
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::ability::{ContinuousModification, CopiableValues, LatchedCopiableSnapshot};
 use engine::types::card::{PrintedCardRef, TokenArtDescriptor, TokenImageRef};
+use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaColor;
+use engine::types::player::PlayerId;
+use engine::types::proposed_event::CopyTokenSpec;
 use serde_json::{json, Value};
 
 fn sample_values() -> CopiableValues {
@@ -134,4 +137,57 @@ fn legacy_latched_snapshot_without_token_art_deserializes() {
     let back: LatchedCopiableSnapshot =
         serde_json::from_value(serde_json::to_value(&full).unwrap()).unwrap();
     assert_eq!(back, full);
+}
+
+/// A printed-card-sourced `CopyTokenSpec` whose display fields are all absent,
+/// so stripping their keys reproduces the pre-bundle skip-serialized shape.
+fn printed_card_copy_token_spec() -> CopyTokenSpec {
+    CopyTokenSpec {
+        values: Box::new(sample_values()),
+        display: DisplayIdentity {
+            display_source: DisplaySource::Card,
+            printed_ref: None,
+            token_image_ref: None,
+            token_art: None,
+        },
+        extra_keywords: Vec::new(),
+        additional_modifications: Vec::new(),
+        tapped: false,
+        enters_attacking: false,
+        sacrifice_at: None,
+        source_id: ObjectId(1),
+        controller: PlayerId(0),
+    }
+}
+
+#[test]
+fn legacy_copy_token_spec_json_without_display_keys_round_trips() {
+    let spec = printed_card_copy_token_spec();
+    let mut json = serde_json::to_value(&spec).unwrap();
+    let object = json.as_object_mut().unwrap();
+    // Reach-guard: the current shape writes every display key, so each removal is real.
+    for key in ["printed_ref", "token_image_ref", "token_art"] {
+        assert!(object.remove(key).is_some(), "{key} must be serialized");
+    }
+    let parsed: CopyTokenSpec = serde_json::from_value(json).unwrap();
+    assert_eq!(parsed, spec);
+}
+
+#[test]
+fn legacy_copy_token_spec_json_without_display_source_defaults_to_card() {
+    let spec = printed_card_copy_token_spec();
+    let mut json = serde_json::to_value(&spec).unwrap();
+    let object = json.as_object_mut().unwrap();
+    // Reach-guard: every display key, including `display_source`, is present before removal.
+    for key in [
+        "display_source",
+        "printed_ref",
+        "token_image_ref",
+        "token_art",
+    ] {
+        assert!(object.remove(key).is_some(), "{key} must be serialized");
+    }
+    let parsed: CopyTokenSpec = serde_json::from_value(json).unwrap();
+    assert_eq!(parsed.display.display_source, DisplaySource::Card);
+    assert_eq!(parsed, spec);
 }
