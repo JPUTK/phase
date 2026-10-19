@@ -5011,21 +5011,18 @@ fn create_entry_copy_spec_for_replacement(
     else {
         return None;
     };
-    let (values, display_source, printed_ref, token_image_ref, token_art) =
-        if let Some(source) = state.objects.get(copy_source) {
-            (
-                crate::game::layers::compute_current_copiable_values(state, *copy_source)?,
-                source.display_source,
-                source.printed_ref.clone(),
-                source.token_image_ref.clone(),
-                source.token_art.clone(),
-            )
-        } else {
-            let values = state.lki_copiable_values.get(copy_source)?.clone();
-            let lki = state.lki_cache.get(copy_source);
-            (
-                values,
-                if lki
+    let (values, display) = if let Some(source) = state.objects.get(copy_source) {
+        (
+            crate::game::layers::compute_current_copiable_values(state, *copy_source)?,
+            source.display_identity(),
+        )
+    } else {
+        let values = state.lki_copiable_values.get(copy_source)?.clone();
+        let lki = state.lki_cache.get(copy_source);
+        (
+            values,
+            crate::game::game_object::DisplayIdentity {
+                display_source: if lki
                     .and_then(|snapshot| snapshot.token_image_ref.as_ref())
                     .is_some()
                 {
@@ -5033,19 +5030,17 @@ fn create_entry_copy_spec_for_replacement(
                 } else {
                     crate::game::game_object::DisplaySource::Card
                 },
-                None,
-                lki.and_then(|snapshot| snapshot.token_image_ref.clone()),
+                printed_ref: None,
+                token_image_ref: lki.and_then(|snapshot| snapshot.token_image_ref.clone()),
                 // `LKISnapshot` is filter-shaped and carries no descriptor;
                 // the recipient falls back to its live (copied) fields.
-                None,
-            )
-        };
+                token_art: None,
+            },
+        )
+    };
     Some(CopyTokenSpec {
         values: Box::new(values),
-        display_source,
-        printed_ref,
-        token_image_ref,
-        token_art,
+        display,
         extra_keywords: Vec::new(),
         additional_modifications: additional_modifications.clone(),
         tapped: false,
