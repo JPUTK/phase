@@ -47684,10 +47684,7 @@ mod tests {
         let copy_values = |values: CopiableValues| {
             generic(granting(ContinuousModification::CopyValues {
                 values: Box::new(values),
-                display_source: Default::default(),
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
+                display: Default::default(),
             }))
         };
         let token = |static_abilities: Vec<StaticDefinition>| Effect::Token {
