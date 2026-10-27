@@ -1098,7 +1098,7 @@ impl<'a> ClientGameStateRef<'a> {
     }
 
     /// [`Self::wrap`] for a seated viewer with an explicit hand-disclosure
-    /// choice (the sandbox "show hands" toggle). The engine decides whether the
+    /// choice (the local "Show AI Hand" toggle). The engine decides whether the
     /// viewer may receive it; an unauthorized request yields the rules projection.
     pub fn wrap_with_hand_disclosure(
         state: &'a GameState,

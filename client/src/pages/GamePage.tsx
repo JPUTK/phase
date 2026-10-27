@@ -1069,25 +1069,36 @@ function GamePageContent({
       adapter.setAiDecisionDiagnosticsEnabled(false);
     };
   }, [adapter, aiDecisionCaptureEnabled]);
-  // Sandbox "Show AI Hand": the engine owns hidden-card disclosure. Ask it for
-  // (or stop asking for) the revealed projection, then commit a fresh snapshot
-  // so the board renders whatever the engine now sends for this seat.
+  // "Show AI Hand": the engine owns hidden-card disclosure. While the toggle is
+  // on, ask it for the revealed projection; turning it off or leaving the game
+  // withdraws the request. Each change commits a fresh snapshot so the board
+  // renders whatever the engine now sends for this seat. Every engine game
+  // install starts hidden, so nothing needs sending while the toggle is off.
   const hasGameState = useGameStore((s) => s.gameState != null);
   useEffect(() => {
-    if (!hasGameState || !supportsDebugHandReveal(adapter)) return;
+    if (!showAiHand || !hasGameState || !supportsDebugHandReveal(adapter)) return;
     let cancelled = false;
-    void (async () => {
+    // The await may cross a game teardown/swap; only the live game's adapter
+    // may refresh the board.
+    const stillLive = () => {
+      const { adapter: currentAdapter, gameState } = useGameStore.getState();
+      return currentAdapter === adapter && gameState != null;
+    };
+    const applyHandReveal = async (enabled: boolean, isCurrent: () => boolean) => {
       try {
-        await adapter.setDebugHandReveal(showAiHand);
+        await adapter.setDebugHandReveal(enabled);
+        if (!isCurrent() || !stillLive()) return;
         const snapshot = await adapter.getSnapshot();
-        if (cancelled || useGameStore.getState().adapter !== adapter) return;
+        if (!isCurrent() || !stillLive()) return;
         useGameStore.getState().commitEngineSnapshot(snapshot);
       } catch (err) {
         console.warn("Show AI Hand: engine projection refresh failed", err);
       }
-    })();
+    };
+    void applyHandReveal(true, () => !cancelled);
     return () => {
       cancelled = true;
+      void applyHandReveal(false, () => true);
     };
   }, [adapter, hasGameState, showAiHand]);
   // The AUTHORITATIVE game mode. The URL-derived `mode` prop structurally
@@ -1780,7 +1791,7 @@ function GamePageContent({
       {/* Game menu — top-left hamburger */}
       <GameMenu
         gameId={gameId}
-        isAiMode={mode === "ai"}
+        isAiMode={mode === "ai" && supportsDebugHandReveal(adapter)}
         isOnlineMode={isOnlineMode}
         showAiHand={showAiHand}
         onToggleAiHand={() => setShowAiHand((v) => !v)}

@@ -585,10 +585,14 @@ export class WasmAdapter
 
   /**
    * Ask the engine to disclose every hand in this seat's projection (the
-   * sandbox "Show AI Hand" toggle). The engine honors it only for a seat with
-   * sandbox debug identity access; the next snapshot carries the result.
+   * "Show AI Hand" toggle). The engine honors it only for a seat with debug
+   * identity access; the next snapshot carries the result.
    */
   async setDebugHandReveal(enabled: boolean): Promise<void> {
+    // Every engine game install starts with hands hidden, so withdrawing the
+    // request from an engine that is not (or no longer) running is a no-op —
+    // e.g. the game page's cleanup racing adapter disposal.
+    if (!enabled && !this.initialized) return;
     this.assertInitialized("setDebugHandReveal");
     try {
       if (this.engine) await this.engine.setDebugHandReveal(enabled);

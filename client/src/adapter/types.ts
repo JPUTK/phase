@@ -5234,7 +5234,7 @@ export function supportsAiDecisionDiagnostics(
 
 /**
  * Local-engine transports that can ask the engine to disclose every hand in the
- * local seat's projection (sandbox "Show AI Hand"). The engine decides whether
+ * local seat's projection ("Show AI Hand"). The engine decides whether
  * the seat is entitled to it; the client never reconstructs hidden cards.
  */
 export interface DebugHandRevealCapability {

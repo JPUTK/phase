@@ -645,9 +645,9 @@ export function resume_restored_game_state(): any;
 export function search_cards_js(query: any): any;
 
 /**
- * Request (or stop requesting) the sandbox "show hands" disclosure for the
- * local seat's `get_game_state` projection. The engine honors it only for a
- * seat with sandbox debug identity access; otherwise hands stay hidden.
+ * Request (or stop requesting) the "Show AI Hand" disclosure for the local
+ * seat's `get_game_state` projection. The engine honors it only for a seat
+ * with debug identity access; otherwise hands stay hidden.
  */
 export function set_debug_hand_reveal(enabled: boolean): void;
 

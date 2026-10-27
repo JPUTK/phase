@@ -628,8 +628,10 @@ thread_local! {
     /// starts a new generation even when the state revision happens to match.
     static AI_PROPOSALS: RefCell<AiProposalRegistry> = RefCell::new(AiProposalRegistry::default());
     /// The local seat's requested hand disclosure for `get_game_state` (the
-    /// sandbox "show hands" toggle). A view preference only: the engine decides
+    /// "Show AI Hand" toggle). A view preference only: the engine decides
     /// whether the seat is entitled to it, and it never touches `GameState`.
+    /// Every game install resets it (`reset_hand_disclosure`), so a request
+    /// never outlives the game it was made in.
     static HAND_DISCLOSURE: Cell<HandDisclosure> = const { Cell::new(HandDisclosure::Rules) };
 }
 
@@ -940,6 +942,7 @@ pub fn clear_game_state() {
     clear_ai_session_cache();
     REPLAY_LOG.with(|cell| cell.set(None));
     invalidate_ai_proposals();
+    reset_hand_disclosure();
 }
 
 /// Verify WASM integration works.
@@ -1976,6 +1979,7 @@ fn initialize_game_impl(
     claim_engine_for(kind);
     clear_ai_session_cache();
     invalidate_ai_proposals();
+    reset_hand_disclosure();
 
     to_js(&result)
 }
@@ -2514,7 +2518,7 @@ pub fn get_game_state() -> JsValue {
             &engine::game::derived_views::ClientGameStateRef::wrap_with_hand_disclosure(
                 state,
                 PlayerId(0),
-                HAND_DISCLOSURE.with(Cell::get),
+                requested_hand_disclosure(),
             ),
         )
     }) {
@@ -2523,9 +2527,9 @@ pub fn get_game_state() -> JsValue {
     }
 }
 
-/// Request (or stop requesting) the sandbox "show hands" disclosure for the
-/// local seat's `get_game_state` projection. The engine honors it only for a
-/// seat with sandbox debug identity access; otherwise hands stay hidden.
+/// Request (or stop requesting) the "Show AI Hand" disclosure for the local
+/// seat's `get_game_state` projection. The engine honors it only for a seat
+/// with debug identity access; otherwise hands stay hidden.
 #[wasm_bindgen]
 pub fn set_debug_hand_reveal(enabled: bool) {
     HAND_DISCLOSURE.with(|cell| {
@@ -2535,6 +2539,50 @@ pub fn set_debug_hand_reveal(enabled: bool) {
             HandDisclosure::Rules
         })
     });
+}
+
+/// The disclosure `get_game_state` asks the engine for. A multiplayer host's
+/// own view is a seat at a table of humans, never a local debug view, so it is
+/// always the rules projection regardless of any stale local request.
+fn requested_hand_disclosure() -> HandDisclosure {
+    if MULTIPLAYER_MODE.with(Cell::get) {
+        HandDisclosure::Rules
+    } else {
+        HAND_DISCLOSURE.with(Cell::get)
+    }
+}
+
+fn reset_hand_disclosure() {
+    HAND_DISCLOSURE.with(|cell| cell.set(HandDisclosure::Rules));
+}
+
+#[cfg(test)]
+mod hand_disclosure_preference_tests {
+    use super::*;
+
+    #[test]
+    fn toggle_requests_and_withdraws_the_reveal() {
+        set_debug_hand_reveal(true);
+        assert_eq!(requested_hand_disclosure(), HandDisclosure::DebugRevealAll);
+        set_debug_hand_reveal(false);
+        assert_eq!(requested_hand_disclosure(), HandDisclosure::Rules);
+    }
+
+    #[test]
+    fn a_multiplayer_host_view_ignores_a_stale_local_request() {
+        set_debug_hand_reveal(true);
+        set_multiplayer_mode(true);
+        assert_eq!(requested_hand_disclosure(), HandDisclosure::Rules);
+        set_multiplayer_mode(false);
+        reset_hand_disclosure();
+    }
+
+    #[test]
+    fn clearing_the_game_withdraws_the_reveal() {
+        set_debug_hand_reveal(true);
+        clear_game_state();
+        assert_eq!(requested_hand_disclosure(), HandDisclosure::Rules);
+    }
 }
 
 /// Variant of `get_game_state` that takes the viewer seat as an argument.
@@ -3381,6 +3429,7 @@ fn resume_multiplayer_host_state_inner(
 
     GAME_STATE.with(|cell| cell.set(Some(state)));
     MULTIPLAYER_MODE.with(|cell| cell.set(true));
+    reset_hand_disclosure();
     // The fresh RNG state is installed before the engine evaluates the saved
     // session, and no caller can observe the hosted snapshot until this
     // returns its bounded engine presentation.

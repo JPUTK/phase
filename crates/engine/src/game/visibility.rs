@@ -1320,16 +1320,19 @@ pub enum HandDisclosure {
     /// private access to them) sees the cards' faces.
     #[default]
     Rules,
-    /// Sandbox "show hands": every hand's identities are disclosed to a viewer
-    /// holding sandbox debug identity access. Falls back to [`Self::Rules`] for
-    /// any other viewer, so asking for it never widens an ordinary projection.
+    /// Debug "show hands" (the local "Show AI Hand" toggle): every hand's
+    /// identities are disclosed to a viewer holding debug identity access.
+    /// Falls back to [`Self::Rules`] for any other viewer, so asking for it
+    /// never widens an ordinary projection.
     DebugRevealAll,
 }
 
-/// Sandbox debug identity access: the explicit per-seat grant that lets a
-/// viewer see hidden-zone card identities. This is debug god-mode, not a rule —
-/// both `debug_mode` and an explicit `debug_permitted` membership are required,
-/// so an unrestricted (empty) permission set does not grant it.
+/// Debug identity access: the explicit per-seat grant that lets a viewer see
+/// hidden-zone card identities. This is debug god-mode, not a rule — both
+/// `debug_mode` and an explicit `debug_permitted` membership are required, so
+/// an unrestricted (empty) permission set does not grant it. Local games grant
+/// it to the local seat and sandbox games to every seat; a non-sandbox
+/// multiplayer game grants it to no one.
 pub(crate) fn viewer_has_debug_identity_access(state: &GameState, viewer: PlayerId) -> bool {
     state.debug_mode && state.debug_permitted.contains(&viewer)
 }
@@ -9440,26 +9443,32 @@ mod tests {
         (state, hand_card, library_card)
     }
 
-    /// The sandbox "show hands" disclosure restores opponent hand identities for
-    /// a viewer with debug identity access, and only hands: libraries stay hidden.
+    /// The "show hands" disclosure restores opponent hand identities for a
+    /// viewer with debug identity access, and only hands: libraries stay hidden.
     #[test]
     fn debug_hand_disclosure_reveals_opponent_hand_only() {
-        let (mut state, hand_card, library_card) = opponent_hand_and_library_state();
-        state.debug_mode = true;
-        state.debug_permitted.extend([PlayerId(0), PlayerId(1)]);
+        // Debug grants as the WASM bridge seeds them (`initialize_debug_permissions`):
+        // a sandbox game grants every seat; a local non-sandbox game grants only
+        // the local seat.
+        let grants: [&[PlayerId]; 2] = [&[PlayerId(0), PlayerId(1)], &[PlayerId(0)]];
+        for grant in grants {
+            let (mut state, hand_card, library_card) = opponent_hand_and_library_state();
+            state.debug_mode = true;
+            state.debug_permitted.extend(grant.iter().copied());
 
-        let filtered = filter_state_for_viewer_with_hand_disclosure(
-            &state,
-            PlayerId(0),
-            HandDisclosure::DebugRevealAll,
-        );
+            let filtered = filter_state_for_viewer_with_hand_disclosure(
+                &state,
+                PlayerId(0),
+                HandDisclosure::DebugRevealAll,
+            );
 
-        let revealed = &filtered.objects[&hand_card];
-        assert_eq!(revealed.name, "Opponent Hand Card");
-        assert!(revealed.display_visible_to_viewer);
-        assert!(filtered.players[1].hand.contains(&hand_card));
-        assert_eq!(filtered.objects[&library_card].name, HIDDEN_CARD_NAME);
-        assert!(!filtered.objects[&library_card].display_visible_to_viewer);
+            let revealed = &filtered.objects[&hand_card];
+            assert_eq!(revealed.name, "Opponent Hand Card", "grant={grant:?}");
+            assert!(revealed.display_visible_to_viewer);
+            assert!(filtered.players[1].hand.contains(&hand_card));
+            assert_eq!(filtered.objects[&library_card].name, HIDDEN_CARD_NAME);
+            assert!(!filtered.objects[&library_card].display_visible_to_viewer);
+        }
     }
 
     /// Without explicit debug identity access, or without asking for it, the
@@ -9469,8 +9478,8 @@ mod tests {
         // (debug_mode, viewer explicitly permitted, disclosure requested)
         let cases = [
             (true, true, HandDisclosure::Rules),
-            // A local non-sandbox game: debug mode with an unrestricted (empty)
-            // permission set is not an explicit identity grant.
+            // A non-sandbox multiplayer game: debug mode with an unrestricted
+            // (empty) permission set is not an explicit identity grant.
             (true, false, HandDisclosure::DebugRevealAll),
             (false, true, HandDisclosure::DebugRevealAll),
         ];
