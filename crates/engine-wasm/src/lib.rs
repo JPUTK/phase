@@ -632,8 +632,10 @@ thread_local! {
     /// whether the seat is entitled to it, and it never touches `GameState`.
     /// Installing a new game (initialize, clear, multiplayer-host resume)
     /// resets it (`reset_hand_disclosure`), so a request never outlives the
-    /// game it was made in. A restore (undo, debug import) keeps it, matching
-    /// the still-mounted page toggle that made the request.
+    /// game it was made in. A restore keeps it: only the client knows whether a
+    /// restore rewinds this game (checkpoint undo, request kept) or replaces it
+    /// (an import starts a new client game session, which withdraws and
+    /// re-sends the request for the new game).
     static HAND_DISCLOSURE: Cell<HandDisclosure> = const { Cell::new(HandDisclosure::Rules) };
 }
 
@@ -2513,20 +2515,23 @@ fn handle_debug_create_card_inner(
 /// `engine::game::derived_views::ClientGameStateRef`.
 #[wasm_bindgen]
 pub fn get_game_state() -> JsValue {
-    match with_state(|state| {
-        // The local human is always PlayerId(0). The projection filters the
-        // state for that seat and scopes web-slinging costs to its hand.
-        to_js(
-            &engine::game::derived_views::ClientGameStateRef::wrap_with_hand_disclosure(
-                state,
-                PlayerId(0),
-                requested_hand_disclosure(),
-            ),
-        )
-    }) {
+    match with_state(|state| to_js(&local_seat_client_state(state))) {
         Ok(val) => val,
         Err(_) => JsValue::NULL,
     }
+}
+
+/// The envelope `get_game_state` exports. The local human is always
+/// PlayerId(0): the projection filters the state for that seat (applying the
+/// requested hand disclosure) and scopes web-slinging costs to its hand.
+fn local_seat_client_state(
+    state: &GameState,
+) -> engine::game::derived_views::ClientGameStateRef<'_> {
+    engine::game::derived_views::ClientGameStateRef::wrap_with_hand_disclosure(
+        state,
+        PlayerId(0),
+        requested_hand_disclosure(),
+    )
 }
 
 /// Request (or stop requesting) the "Show AI Hand" disclosure for the local
@@ -2577,6 +2582,46 @@ mod hand_disclosure_preference_tests {
         assert_eq!(requested_hand_disclosure(), HandDisclosure::Rules);
         set_multiplayer_mode(false);
         reset_hand_disclosure();
+    }
+
+    /// The exported `get_game_state` envelope: a local game's AI hand card
+    /// shows its identity only while the reveal is requested, and never to a
+    /// multiplayer host's own view.
+    #[test]
+    fn exported_state_projects_ai_hand_identity_by_request() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        initialize_debug_permissions(&mut state, false);
+        let card = engine::game::zones::create_object(
+            &mut state,
+            engine::types::identifiers::CardId(1),
+            PlayerId(1),
+            "AI Secret Card".to_string(),
+            engine::types::zones::Zone::Hand,
+        );
+        let exported_card = || {
+            let wire = serde_json::to_value(local_seat_client_state(&state))
+                .expect("client state serializes");
+            let object = &wire["state"]["objects"][card.0.to_string()];
+            (
+                object["name"].as_str().map(str::to_owned),
+                // Omitted on the wire when false; the client reads it as false.
+                object["display_visible_to_viewer"]
+                    .as_bool()
+                    .unwrap_or(false),
+            )
+        };
+        let hidden = (Some("Hidden Card".to_string()), false);
+        let revealed = (Some("AI Secret Card".to_string()), true);
+
+        reset_hand_disclosure();
+        assert_eq!(exported_card(), hidden);
+        set_debug_hand_reveal(true);
+        assert_eq!(exported_card(), revealed);
+        set_multiplayer_mode(true);
+        assert_eq!(exported_card(), hidden);
+        set_multiplayer_mode(false);
+        set_debug_hand_reveal(false);
+        assert_eq!(exported_card(), hidden);
     }
 
     #[test]

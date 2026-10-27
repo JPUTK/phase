@@ -37,6 +37,7 @@ import { useDraftStore } from "../stores/draftStore";
 import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
 import { useResolvedGridRows, useResolvedSplitGridRows } from "../hooks/useResolvedGridRows.ts";
+import { useDebugHandReveal } from "../hooks/useDebugHandReveal";
 import { useIsMobile } from "../hooks/useIsMobile.ts";
 import { useLocalizedCardContent } from "../hooks/useLocalizedCardContent.ts";
 import { CardTextReference } from "../components/card/CardTextReference.tsx";
@@ -1069,41 +1070,7 @@ function GamePageContent({
       adapter.setAiDecisionDiagnosticsEnabled(false);
     };
   }, [adapter, aiDecisionCaptureEnabled]);
-  // "Show AI Hand": the engine owns hidden-card disclosure. While the toggle is
-  // on, ask it for the revealed projection; turning it off or leaving the game
-  // withdraws the request. Each change commits a fresh snapshot so the board
-  // renders whatever the engine now sends for this seat. Every engine game
-  // install starts hidden, so nothing needs sending while the toggle is off;
-  // keying on the session generation re-sends the request after a new game
-  // (e.g. a rematch on the shared adapter) is installed with the toggle on.
-  const hasGameState = useGameStore((s) => s.gameState != null);
-  const gameSessionGeneration = useGameStore((s) => s.gameSessionGeneration);
-  useEffect(() => {
-    if (!showAiHand || !hasGameState || !supportsDebugHandReveal(adapter)) return;
-    let cancelled = false;
-    // The await may cross a game teardown/swap; only the live game's adapter
-    // may refresh the board.
-    const stillLive = () => {
-      const { adapter: currentAdapter, gameState } = useGameStore.getState();
-      return currentAdapter === adapter && gameState != null;
-    };
-    const applyHandReveal = async (enabled: boolean, isCurrent: () => boolean) => {
-      try {
-        await adapter.setDebugHandReveal(enabled);
-        if (!isCurrent() || !stillLive()) return;
-        const snapshot = await adapter.getSnapshot();
-        if (!isCurrent() || !stillLive()) return;
-        useGameStore.getState().commitEngineSnapshot(snapshot);
-      } catch (err) {
-        console.warn("Show AI Hand: engine projection refresh failed", err);
-      }
-    };
-    void applyHandReveal(true, () => !cancelled);
-    return () => {
-      cancelled = true;
-      void applyHandReveal(false, () => true);
-    };
-  }, [adapter, hasGameState, gameSessionGeneration, showAiHand]);
+  useDebugHandReveal(showAiHand);
   // The AUTHORITATIVE game mode. The URL-derived `mode` prop structurally
   // cannot contain `native-ai` (desktop solo arrives as `rawMode === "ai"`), so
   // it cannot answer "is anyone else at this table?".
