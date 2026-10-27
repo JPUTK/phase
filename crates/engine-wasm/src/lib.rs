@@ -29,6 +29,7 @@ use engine::game::preview::{
 // Deep-path import by design: `engine::game::mod` re-exports `deck_validation`'s
 // public surface, but this phase must not edit that file.
 use engine::game::deck_validation::{draft_set_concessions_for, evaluate_deck_format_gate};
+use engine::game::visibility::HandDisclosure;
 use engine::game::CardDbRehydrationFinalization;
 use engine::game::{
     can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket,
@@ -626,6 +627,10 @@ thread_local! {
     /// They deliberately do not serialize with `GameState`: a restore/new game
     /// starts a new generation even when the state revision happens to match.
     static AI_PROPOSALS: RefCell<AiProposalRegistry> = RefCell::new(AiProposalRegistry::default());
+    /// The local seat's requested hand disclosure for `get_game_state` (the
+    /// sandbox "show hands" toggle). A view preference only: the engine decides
+    /// whether the seat is entitled to it, and it never touches `GameState`.
+    static HAND_DISCLOSURE: Cell<HandDisclosure> = const { Cell::new(HandDisclosure::Rules) };
 }
 
 #[derive(Debug, Clone)]
@@ -2503,16 +2508,33 @@ fn handle_debug_create_card_inner(
 #[wasm_bindgen]
 pub fn get_game_state() -> JsValue {
     match with_state(|state| {
-        // The local human is always PlayerId(0). `wrap` filters the state for
-        // that seat and scopes web-slinging costs to its hand.
-        to_js(&engine::game::derived_views::ClientGameStateRef::wrap(
-            state,
-            Some(PlayerId(0)),
-        ))
+        // The local human is always PlayerId(0). The projection filters the
+        // state for that seat and scopes web-slinging costs to its hand.
+        to_js(
+            &engine::game::derived_views::ClientGameStateRef::wrap_with_hand_disclosure(
+                state,
+                PlayerId(0),
+                HAND_DISCLOSURE.with(Cell::get),
+            ),
+        )
     }) {
         Ok(val) => val,
         Err(_) => JsValue::NULL,
     }
+}
+
+/// Request (or stop requesting) the sandbox "show hands" disclosure for the
+/// local seat's `get_game_state` projection. The engine honors it only for a
+/// seat with sandbox debug identity access; otherwise hands stay hidden.
+#[wasm_bindgen]
+pub fn set_debug_hand_reveal(enabled: bool) {
+    HAND_DISCLOSURE.with(|cell| {
+        cell.set(if enabled {
+            HandDisclosure::DebugRevealAll
+        } else {
+            HandDisclosure::Rules
+        })
+    });
 }
 
 /// Variant of `get_game_state` that takes the viewer seat as an argument.

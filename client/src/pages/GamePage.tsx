@@ -23,7 +23,11 @@ import type {
   SerializedAbilityCost,
   AiDecisionDiagnosticReceipt,
 } from "../adapter/types";
-import { supportsAiDecisionDiagnostics, supportsMatchConcede } from "../adapter/types";
+import {
+  supportsAiDecisionDiagnostics,
+  supportsDebugHandReveal,
+  supportsMatchConcede,
+} from "../adapter/types";
 import type {
   InteractionManaRestriction,
   InteractionPresentationSurface,
@@ -1065,6 +1069,27 @@ function GamePageContent({
       adapter.setAiDecisionDiagnosticsEnabled(false);
     };
   }, [adapter, aiDecisionCaptureEnabled]);
+  // Sandbox "Show AI Hand": the engine owns hidden-card disclosure. Ask it for
+  // (or stop asking for) the revealed projection, then commit a fresh snapshot
+  // so the board renders whatever the engine now sends for this seat.
+  const hasGameState = useGameStore((s) => s.gameState != null);
+  useEffect(() => {
+    if (!hasGameState || !supportsDebugHandReveal(adapter)) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        await adapter.setDebugHandReveal(showAiHand);
+        const snapshot = await adapter.getSnapshot();
+        if (cancelled || useGameStore.getState().adapter !== adapter) return;
+        useGameStore.getState().commitEngineSnapshot(snapshot);
+      } catch (err) {
+        console.warn("Show AI Hand: engine projection refresh failed", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [adapter, hasGameState, showAiHand]);
   // The AUTHORITATIVE game mode. The URL-derived `mode` prop structurally
   // cannot contain `native-ai` (desktop solo arrives as `rawMode === "ai"`), so
   // it cannot answer "is anyone else at this table?".
@@ -1565,7 +1590,7 @@ function GamePageContent({
             <>
               <div aria-hidden />
               <div className="min-w-0">
-                <OpponentHand showCards={showAiHand} />
+                <OpponentHand />
               </div>
               <DraggableWidget
                 target={{ kind: "widget", key: "opponentPiles" }}
@@ -1613,7 +1638,6 @@ function GamePageContent({
             effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout}
             oppHud={oppHud}
             playerHud={playerHud}
-            showOpponentCards={showAiHand}
             onKickPlayer={isP2PHost ? handleKickPlayer : undefined}
             onViewZone={handleViewZone}
           />
