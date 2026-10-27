@@ -1073,8 +1073,11 @@ function GamePageContent({
   // on, ask it for the revealed projection; turning it off or leaving the game
   // withdraws the request. Each change commits a fresh snapshot so the board
   // renders whatever the engine now sends for this seat. Every engine game
-  // install starts hidden, so nothing needs sending while the toggle is off.
+  // install starts hidden, so nothing needs sending while the toggle is off;
+  // keying on the session generation re-sends the request after a new game
+  // (e.g. a rematch on the shared adapter) is installed with the toggle on.
   const hasGameState = useGameStore((s) => s.gameState != null);
+  const gameSessionGeneration = useGameStore((s) => s.gameSessionGeneration);
   useEffect(() => {
     if (!showAiHand || !hasGameState || !supportsDebugHandReveal(adapter)) return;
     let cancelled = false;
@@ -1100,7 +1103,7 @@ function GamePageContent({
       cancelled = true;
       void applyHandReveal(false, () => true);
     };
-  }, [adapter, hasGameState, showAiHand]);
+  }, [adapter, hasGameState, gameSessionGeneration, showAiHand]);
   // The AUTHORITATIVE game mode. The URL-derived `mode` prop structurally
   // cannot contain `native-ai` (desktop solo arrives as `rawMode === "ai"`), so
   // it cannot answer "is anyone else at this table?".

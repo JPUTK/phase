@@ -630,8 +630,10 @@ thread_local! {
     /// The local seat's requested hand disclosure for `get_game_state` (the
     /// "Show AI Hand" toggle). A view preference only: the engine decides
     /// whether the seat is entitled to it, and it never touches `GameState`.
-    /// Every game install resets it (`reset_hand_disclosure`), so a request
-    /// never outlives the game it was made in.
+    /// Installing a new game (initialize, clear, multiplayer-host resume)
+    /// resets it (`reset_hand_disclosure`), so a request never outlives the
+    /// game it was made in. A restore (undo, debug import) keeps it, matching
+    /// the still-mounted page toggle that made the request.
     static HAND_DISCLOSURE: Cell<HandDisclosure> = const { Cell::new(HandDisclosure::Rules) };
 }
 
