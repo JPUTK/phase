@@ -1633,6 +1633,7 @@ mod unresolved_look_result;
 mod unstoppable_slasher_half_life;
 mod untargeted_damage_recipient_chooser;
 mod until_next_step_deadline_durations;
+mod until_self_cast_land_grant;
 mod until_source_leaves_cr610_3a;
 mod until_source_leaves_cr610_3b;
 mod up_to_one_later_target_spells;

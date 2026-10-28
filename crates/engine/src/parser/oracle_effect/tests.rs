@@ -95228,3 +95228,123 @@ fn compound_shuffle_self_and_its_owners_graveyard_moves_owners_graveyard() {
         })
     ));
 }
+
+/// The self-referential exile-lifetime grant a `try_parse_play_from_exile`
+/// clause lowered to, as `(mode, duration)`; panics on any other shape.
+fn self_card_play_grant(clause: &ParsedEffectClause) -> (CardPlayMode, Duration) {
+    match &clause.effect {
+        Effect::GrantCastingPermission {
+            permission: CastingPermission::PlayFromExile { mode, duration, .. },
+            target: TargetFilter::SelfRef,
+            ..
+        } => (*mode, duration.clone()),
+        other => panic!("expected a SelfRef PlayFromExile grant, got {other:?}"),
+    }
+}
+
+/// CR 400.7j + CR 611.2a: "[you may] cast/play this card for as long as it
+/// remains exiled" grants the exiled card itself (`SelfRef`) a permission
+/// bounded by its exile lifetime (`Permanent`, ended by zone-exit cleanup) —
+/// in the full form, the bare form the clause shell leaves once "you may " is
+/// peeled, and the "~" self-name form. A chosen parent target does not divert
+/// it: a self-reference is not an anaphor.
+#[test]
+fn self_card_exile_lifetime_permission_targets_the_card_itself() {
+    let ctx = ParseContext::default();
+    let chosen = ParseContext {
+        parent_target_is_chosen: true,
+        ..ParseContext::default()
+    };
+    for (text, mode) in [
+        ("cast this card for as long as it remains exiled", Cast),
+        (
+            "you may cast this card for as long as it remains exiled",
+            Cast,
+        ),
+        (
+            "you may play this card for as long as it remains exiled",
+            Play,
+        ),
+        ("you may cast ~ for as long as it remains exiled", Cast),
+    ] {
+        for ctx in [&ctx, &chosen] {
+            let clause = try_parse_play_from_exile(TextPair::new(text, text), ctx)
+                .unwrap_or_else(|| panic!("{text}: no permission"));
+            assert_eq!(
+                self_card_play_grant(&clause),
+                (mode, Duration::Permanent),
+                "{text}"
+            );
+        }
+    }
+
+    // Through the whole effect chain, with the "you may" shell.
+    for (text, mode) in [
+        (
+            "You may cast this card for as long as it remains exiled.",
+            Cast,
+        ),
+        (
+            "You may play this card for as long as it remains exiled.",
+            Play,
+        ),
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Activated);
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::PlayFromExile {
+                        mode: granted,
+                        duration: Duration::Permanent,
+                        ..
+                    },
+                    target: TargetFilter::SelfRef,
+                    ..
+                } if *granted == mode
+            ),
+            "{text}: {:?}",
+            def.effect
+        );
+    }
+
+    // Preservation: the tracked-set anaphor keeps its referent.
+    let def = parse_effect_chain(
+        "You may cast that card for as long as it remains exiled.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &*def.effect,
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    mode: Cast,
+                    duration: Duration::Permanent,
+                    ..
+                },
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0)
+                },
+                ..
+            }
+        ),
+        "{:?}",
+        def.effect
+    );
+
+    // Negative (paired with the positives above): without an exile lifetime,
+    // "this card" is not read as a self-referential exile permission.
+    let text = "cast this card this turn";
+    assert!(
+        !try_parse_play_from_exile(TextPair::new(text, text), &ctx).is_some_and(|clause| {
+            matches!(
+                clause.effect,
+                Effect::GrantCastingPermission {
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            )
+        }),
+        "{text}"
+    );
+}

@@ -17023,6 +17023,15 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
     } else {
         original_tp
     };
+    // CR 400.7j: "this card" is the card this ability's source became in exile
+    // (moved there by the ability's own cost, or found through the
+    // resolution-source relatch). CR 611.2a: the grant is bounded by that
+    // card's exile lifetime (zone-exit cleanup). A self-reference is not an
+    // anaphor, so it never binds a chosen target or the tracked exile set.
+    let self_grant = owns_exile_lifetime
+        .then(|| parse_self_card_play_grant(tp.lower).ok())
+        .flatten()
+        .map(|(_, mode)| mode);
 
     // Try full forms first: "you may play/cast that card/it/those cards ..."
     // Then bare forms (after "you may" has been stripped): "play that card ..."
@@ -17056,7 +17065,9 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
         .map(|(mode, _)| *mode)
         .unwrap_or(CardPlayMode::Play);
 
-    if let Some((_, rest)) = full_rest {
+    if let Some(self_mode) = self_grant {
+        mode = self_mode;
+    } else if let Some((_, rest)) = full_rest {
         // Full form: rest must start with a card reference
         // CR 400.7i + CR 603.7: "(the) cards exiled this way" is the impulse-set
         // anaphor used by Escape to the Wilds — semantically identical to "those
@@ -17181,7 +17192,7 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
     // without inspecting clause text (a lexical "that card this turn" guard would
     // misroute the entire impulse class and silently drop its `PlayFromExile`
     // shape).
-    if ctx.parent_target_is_chosen {
+    if ctx.parent_target_is_chosen && self_grant.is_none() {
         return None;
     }
 
@@ -17220,7 +17231,11 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
         // source object. `TargetFilter::Any` causes `grant_permission::resolve`
         // to attach the permission to the source itself, which is wrong for
         // impulse-draw chains like Act on Impulse, Light Up the Stage, etc.
-        target: tracked_set_filter(),
+        // CR 400.7j: a "this card" grant attaches to the exiled card itself.
+        target: match self_grant {
+            Some(_) => TargetFilter::SelfRef,
+            None => tracked_set_filter(),
+        },
         grantee: Default::default(),
     });
 
@@ -17234,6 +17249,23 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
         None => clause,
         Some(_) => clause,
     })
+}
+
+/// CR 400.7j: "[you may] play/cast this card" — the whole permission text of a
+/// grant whose referent is this ability's own source card ("~" after self-name
+/// normalization). Both the full form and the bare form left once the clause
+/// shell has peeled "you may " are read. Returns the granted play mode.
+fn parse_self_card_play_grant(input: &str) -> OracleResult<'_, CardPlayMode> {
+    all_consuming((
+        opt(tag("you may ")),
+        alt((
+            value(CardPlayMode::Play, tag("play ")),
+            value(CardPlayMode::Cast, tag("cast ")),
+        )),
+        alt((tag("this card"), tag("~"))),
+    ))
+    .map(|(_, mode, _)| mode)
+    .parse(input)
 }
 
 fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClause> {
