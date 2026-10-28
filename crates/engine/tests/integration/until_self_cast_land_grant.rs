@@ -19,21 +19,27 @@
 //! - CR 903.9a + CR 903.8: a commander that leaves exile uncast (to the
 //!   command zone) loses the permission (CR 400.7), but the land keeps the
 //!   ability, and a later cast from the command zone does not end it.
+//! - CR 113.7a + CR 400.7: each activation's deadline is bound to the exile
+//!   incarnation its own cost created — if the card leaves exile, returns to
+//!   hand (CR 903.9b declined) and is exiled again, casting it ends only the
+//!   later activation's grant.
 
 use engine::ai_support::legal_actions_full;
 use engine::game::mana_abilities::is_mana_ability;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    CardPlayMode, CastingPermission, Duration, Effect, ManaProduction, QuantityExpr, TargetRef,
+    AbilityKind, CardPlayMode, CastingPermission, Duration, Effect, ManaProduction, QuantityExpr,
+    TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, TransientContinuousEffect, WaitingFor};
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 const EMRAKUL: &str = "When you cast this spell, untap all lands you control.\nFlying, trample\nWard—Sacrifice three permanents.\n{3}, Exile this card from your hand: Target land gains \"{T}: Add {C}{C}\" until this card is cast from exile. You may cast this card for as long as it remains exiled.";
+const COMMAND_BEACON: &str = "{T}: Add {C}.\n{T}, Sacrifice this land: Put your commander into your hand from the command zone.";
 const GLAMOROUS_OUTLAW: &str = "When this creature enters, it deals 2 damage to each opponent and you scry 2.\n{2}, Exile this card from your hand: Target land gains \"{T}: Add {U}, {B}, or {R}\" until this card is cast from exile. You may cast this card for as long as it remains exiled.";
 
 fn colorless(count: usize) -> Vec<ManaUnit> {
@@ -92,6 +98,51 @@ fn grant_effect_from(runner: &GameRunner, source: ObjectId) -> Option<&Transient
         .transient_continuous_effects
         .iter()
         .find(|effect| effect.source_id == source)
+}
+
+/// The transient effect `source` created on exactly `land`.
+fn grant_effect_on(
+    runner: &GameRunner,
+    source: ObjectId,
+    land: ObjectId,
+) -> Option<&TransientContinuousEffect> {
+    runner
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .find(|effect| {
+            effect.source_id == source
+                && matches!(&effect.affected, TargetFilter::SpecificObject { id } if *id == land)
+        })
+}
+
+/// The source incarnation (and the zone it was expected in) that the effect's
+/// "until this card is cast" deadline was bound to.
+fn captured_source(effect: &TransientContinuousEffect) -> (ObjectIncarnationRef, Zone) {
+    let context = effect
+        .duration_event_source
+        .as_deref()
+        .expect("an UntilEvent effect carries the source its deadline is matched against");
+    (context.identity.reference, context.identity.expected_zone)
+}
+
+/// Pass priority until the stack holds at most `len` entries, asserting P0 or P1
+/// holds priority on every pass.
+fn pass_until_stack_len(runner: &mut GameRunner, len: usize) {
+    for _ in 0..20 {
+        if runner.state().stack.len() <= len {
+            return;
+        }
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "{:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::PassPriority)
+            .expect("passing priority is legal");
+    }
+    panic!("the stack never shrank to {len} entries");
 }
 
 fn has_until_event_grant_from(runner: &GameRunner, source: ObjectId) -> bool {
@@ -400,6 +451,18 @@ fn the_grant_survives_when_the_card_leaves_exile_uncast() {
     assert!(has_colorless_pair_ability(&runner, land_a));
     assert!(has_until_event_grant_from(&runner, emrakul));
 
+    // CR 113.7a + CR 400.7: the deadline is bound to the exile incarnation the
+    // activation's cost created — its last known information — not to the
+    // command-zone object now stored under the same id.
+    let (captured, expected_zone) = captured_source(
+        grant_effect_from(&runner, emrakul).expect("the activation installed its grant"),
+    );
+    assert_eq!(expected_zone, Zone::Exile);
+    assert_ne!(
+        captured,
+        ObjectIncarnationRef::from_object(&runner.state().objects[&emrakul])
+    );
+
     let start = runner.state().turn_number;
     advance_to_next_own_main(&mut runner);
     assert!(runner.state().turn_number > start);
@@ -418,4 +481,239 @@ fn the_grant_survives_when_the_card_leaves_exile_uncast() {
 
     assert!(has_colorless_pair_ability(&runner, land_a));
     assert!(has_until_event_grant_from(&runner, emrakul));
+}
+
+/// R6 (CR 113.7a + CR 400.7 + CR 611.2a): two activations of one commander's
+/// ability, with the card leaving exile and returning to hand in between
+/// (CR 903.9b, declined), each bind their deadline to the exile incarnation
+/// their own cost created. Casting the card from its later exile ends only the
+/// later activation's grant; the earlier one is waiting on an object that no
+/// longer exists.
+#[test]
+fn casting_the_card_again_after_it_left_exile_ends_only_its_own_grant() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let emrakul = scenario
+        .add_creature_to_hand_from_oracle(P0, "Emrakul, the Exigent Doom", 12, 12, EMRAKUL)
+        .with_mana_cost(ManaCost::generic(2))
+        .commander()
+        .id();
+    let land_a = scenario.add_basic_land(P0, ManaColor::Green);
+    let land_b = scenario.add_basic_land(P0, ManaColor::Green);
+    let beacon = scenario
+        .add_land_from_oracle(P0, "Command Beacon", COMMAND_BEACON)
+        .id();
+    scenario.with_library_top(P0, &["P0 Draw"]);
+    scenario.with_library_top(P1, &["P1 Draw"]);
+    scenario.with_mana_pool(P0, colorless(6));
+    let mut runner = scenario.build();
+    runner.state_mut().format_config.command_zone = true;
+
+    let index = hand_ability_index(&runner, emrakul);
+
+    // Activation 1: exile the commander as a cost, target land_a, and send the
+    // commander to the command zone (CR 903.9a) while the ability is on the stack.
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: emrakul,
+            ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activating from hand is legal");
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::TargetSelection { target_slots, .. }
+                if target_slots.first().is_some_and(|slot| {
+                    [land_a, land_b, beacon]
+                        .iter()
+                        .all(|land| slot.legal_targets.contains(&TargetRef::Object(*land)))
+                })
+        ),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(land_a)),
+        })
+        .expect("targeting land_a is legal");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::CommanderZoneChoice {
+                commander_id,
+                current_zone: Zone::Exile,
+                ..
+            } if commander_id == emrakul
+        ),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("moving the commander to the command zone is legal");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player } if player == P0
+    ));
+    assert_eq!(runner.state().objects[&emrakul].zone, Zone::Command);
+    assert_eq!(runner.state().stack.len(), 1);
+
+    // Command Beacon returns the commander to hand; the replacement is
+    // optional (CR 903.9b), so P0 declines the command zone.
+    let beacon_index = runner.state().objects[&beacon]
+        .abilities
+        .iter()
+        .position(|ability| ability.kind == AbilityKind::Activated && !is_mana_ability(ability))
+        .expect("Command Beacon has its non-mana activated ability");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: beacon,
+            ability_index: beacon_index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activating Command Beacon is legal");
+    assert_eq!(runner.state().stack.len(), 2);
+    for _ in 0..4 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ) {
+            break;
+        }
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "{:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::PassPriority)
+            .expect("passing priority is legal");
+    }
+    let WaitingFor::ReplacementChoice { candidates, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "Command Beacon's resolution asks where the commander goes: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let to_hand = candidates
+        .iter()
+        .position(|candidate| candidate.description == "Put into hand")
+        .expect("the commander may be put into hand instead of the command zone");
+    runner
+        .act(GameAction::ChooseReplacement { index: to_hand })
+        .expect("declining the command zone is legal");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player } if player == P0
+    ));
+    assert_eq!(runner.state().objects[&emrakul].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&beacon].zone, Zone::Graveyard);
+    // Activation 1's ability is still on the stack, waiting on an exile
+    // incarnation that no longer exists.
+    assert_eq!(runner.state().stack.len(), 1);
+
+    // Activation 2: exile it again as a cost, target land_b, and leave it in exile.
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: emrakul,
+            ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activating from hand again is legal");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(land_b)),
+        })
+        .expect("targeting land_b is legal");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::CommanderZoneChoice {
+                commander_id,
+                current_zone: Zone::Exile,
+                ..
+            } if commander_id == emrakul
+        ),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("leaving the commander in exile is legal");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player } if player == P0
+    ));
+    assert_eq!(runner.state().objects[&emrakul].zone, Zone::Exile);
+    assert_eq!(runner.state().stack.len(), 2);
+
+    pass_until_stack_len(&mut runner, 0);
+
+    // Reach: both activations resolved. Each land has the grant, each grant has
+    // its own deadline, and the card in exile holds exactly one permission
+    // (activation 1 found no object to give one to).
+    assert!(has_colorless_pair_ability(&runner, land_a));
+    assert!(has_colorless_pair_ability(&runner, land_b));
+    assert_eq!(runner.state().objects[&emrakul].zone, Zone::Exile);
+    assert_eq!(
+        runner
+            .state()
+            .transient_continuous_effects
+            .iter()
+            .filter(|effect| effect.source_id == emrakul
+                && matches!(effect.duration, Duration::UntilEvent { .. }))
+            .count(),
+        2
+    );
+    assert_eq!(
+        runner.state().objects[&emrakul]
+            .casting_permissions
+            .iter()
+            .filter(|permission| matches!(permission, CastingPermission::PlayFromExile { .. }))
+            .count(),
+        1,
+        "{:?}",
+        runner.state().objects[&emrakul].casting_permissions
+    );
+    assert!(p0_pool_is_empty(&runner));
+    assert!(runner.state().stack.is_empty());
+
+    // Each deadline is bound to its own activation's exile incarnation.
+    let current = ObjectIncarnationRef::from_object(&runner.state().objects[&emrakul]);
+    let (first_exile, first_zone) = captured_source(
+        grant_effect_on(&runner, emrakul, land_a).expect("activation 1 installed its grant"),
+    );
+    let (second_exile, second_zone) = captured_source(
+        grant_effect_on(&runner, emrakul, land_b).expect("activation 2 installed its grant"),
+    );
+    assert_eq!(first_zone, Zone::Exile);
+    assert_ne!(first_exile, current);
+    assert_eq!(second_zone, Zone::Exile);
+    assert_eq!(second_exile, current);
+
+    assert!(offers_cast(&runner, emrakul));
+    cast_with_auto_payment(&mut runner, emrakul);
+
+    // Reach, asserted before passing priority (the cast trigger untaps lands):
+    // the card was cast from exile.
+    let card = &runner.state().objects[&emrakul];
+    assert_eq!(card.zone, Zone::Stack);
+    assert_eq!(card.cast_from_zone, Some(Zone::Exile));
+
+    // Casting that exile incarnation ends only the grant it created.
+    assert!(!has_colorless_pair_ability(&runner, land_b));
+    assert!(grant_effect_on(&runner, emrakul, land_b).is_none());
+    assert!(has_colorless_pair_ability(&runner, land_a));
+    assert!(grant_effect_on(&runner, emrakul, land_a).is_some());
 }

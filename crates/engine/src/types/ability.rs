@@ -39137,6 +39137,21 @@ impl ResolvedAbility {
         ))
     }
 
+    /// CR 113.7a + CR 400.7: the source object an effect this ability creates
+    /// refers to — the object a self-reference binds to while the ability can
+    /// find it (CR 400.7e/f/j), else the incarnation the source had when the
+    /// ability was put on the stack (whose last known information applies,
+    /// CR 608.2h).
+    pub fn effect_source_ref(
+        &self,
+        state: &crate::types::game_state::GameState,
+    ) -> Option<crate::types::identifiers::ObjectIncarnationRef> {
+        self.self_ref_binding(state)
+            .and_then(|id| state.objects.get(&id))
+            .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
+            .or_else(|| self.source_ref(state))
+    }
+
     /// CR 400.7: True if the ability's source is still the same object instance it
     /// was when the ability was created. Full triggered-source provenance takes
     /// precedence; activated and delayed self-transform abilities fall back to

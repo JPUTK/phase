@@ -358,6 +358,62 @@ fn soul_sculptor_effect_ends_after_its_token_source_ceased_to_exist() {
     }
 }
 
+/// R7 (CR 113.7a + CR 608.2h + CR 611.2a): Soul Sculptor leaves the battlefield
+/// while its ability is on the stack. The ability still resolves (CR 113.7a),
+/// and the effect it creates uses the source's last known information, never the
+/// graveyard object that now holds its id; the source-independent deadline
+/// ("until a player casts a creature spell") still ends it.
+#[test]
+fn soul_sculptor_effect_ends_when_its_source_left_before_the_ability_resolved() {
+    let mut board = sculptor_board();
+    activate_sculptor_onto_stack(&mut board);
+    board
+        .runner
+        .cast(board.destroy)
+        .target_object(board.sculptor)
+        .resolve();
+    board.runner.advance_until_stack_empty();
+
+    // Reach: the source left before its ability resolved, and the ability's
+    // effect began without it (CR 113.7a).
+    assert_eq!(
+        board.runner.state().objects[&board.sculptor].zone,
+        Zone::Graveyard
+    );
+    assert!(board.runner.state().stack.is_empty());
+    assert!(
+        watcher_has_no_abilities(&board.runner, board.watcher),
+        "reach: the watcher lost all abilities"
+    );
+
+    // The deadline is bound to the source as it last existed, on the battlefield.
+    let effect = board
+        .runner
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .find(|effect| {
+            effect.source_id == board.sculptor
+                && matches!(effect.duration, Duration::UntilEvent { .. })
+        })
+        .expect("the resolved ability installed its effect");
+    let captured = effect
+        .duration_event_source
+        .as_deref()
+        .expect("an UntilEvent effect carries the source its deadline is matched against");
+    assert_eq!(captured.identity.expected_zone, Zone::Battlefield);
+
+    let _ = board.runner.cast(board.bear).commit();
+    assert!(
+        on_stack(&board.runner, board.bear),
+        "reach: the creature spell has not resolved"
+    );
+    assert!(
+        watcher_has_abilities(&board.runner, board.watcher),
+        "CR 611.2a + CR 601.2i: a creature spell becoming cast ends the effect"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Preservation rows (M-11 (c))
 // ---------------------------------------------------------------------------

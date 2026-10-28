@@ -95333,8 +95333,14 @@ fn self_card_exile_lifetime_permission_targets_the_card_itself() {
     );
 
     // Negative (paired with the positives above): without an exile lifetime,
-    // "this card" is not read as a self-referential exile permission.
-    let text = "cast this card this turn";
+    // "this card" is not read as a self-referential exile permission. The
+    // reach guard shows the grammar fully consumes this text, so only the
+    // exile-lifetime gate can reject it.
+    let text = "cast this card";
+    assert!(
+        parse_self_card_play_grant(text).is_ok(),
+        "reach: the lifetime-free grant is fully consumed, so only the exile-lifetime gate can reject it"
+    );
     assert!(
         !try_parse_play_from_exile(TextPair::new(text, text), &ctx).is_some_and(|clause| {
             matches!(

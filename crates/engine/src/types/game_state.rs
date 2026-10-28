@@ -27157,7 +27157,12 @@ pub struct TransientContinuousEffect {
     pub duration_subject: Option<ObjectIncarnationRef>,
     /// CR 611.2a + CR 400.7: the source context a `Duration::UntilEvent`
     /// effect's event is matched against, captured when the effect is created
-    /// (as a `WhenNextEvent` delayed trigger carries one). `None` for every
+    /// (as a `WhenNextEvent` delayed trigger carries one). For an effect
+    /// installed through `effect.rs::install_transient`, it is captured from the
+    /// creating ability's own source incarnation: its last known information if
+    /// that incarnation has since left its zone, and `None` (the deadline never
+    /// matches) if that incarnation is neither live nor departed this turn. For
+    /// other installs it is captured from the live source. `None` for every
     /// other duration. Rides inside the journaled
     /// `ResolvedContinuousEffectCommand`, so replay installs it verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -30596,6 +30601,24 @@ impl GameState {
         })
     }
 
+    /// CR 400.7 + CR 113.7a + CR 608.2h: the zone change that took the exact
+    /// object `identity` out of the zone it was observed in this turn; its
+    /// source context is that object's last known information. An incarnation
+    /// departs at most once. `None` when it has not departed this turn (the
+    /// ledger is per-turn); callers fail closed and never substitute the
+    /// object now stored under the id.
+    pub(crate) fn incarnation_departure_record(
+        &self,
+        identity: ObjectIncarnationRef,
+    ) -> Option<&ZoneChangeRecord> {
+        self.zone_changes_this_turn.iter().find(|record| {
+            record.object_id == identity.object_id
+                && record
+                    .trigger_source_context()
+                    .is_some_and(|context| context.identity.reference == identity)
+        })
+    }
+
     /// CR 701.50b + CR 400.7: The conniver as it LAST EXISTED on the
     /// battlefield, for a connive whose performer left before the action ran
     /// (and may have returned as a new object at the same storage id).
@@ -30620,13 +30643,7 @@ impl GameState {
             .lki_by_incarnation
             .get(&object_id)
             .and_then(|history| history.get(&identity.incarnation))?;
-        let departure = self.zone_changes_this_turn.iter().find(|record| {
-            record.object_id == object_id
-                && record
-                    .trigger_source_context
-                    .as_ref()
-                    .is_some_and(|context| context.identity.reference == identity)
-        });
+        let departure = self.incarnation_departure_record(identity);
         let context = departure.and_then(|record| record.trigger_source_context.as_ref());
         let entered_this_turn = self.zone_changes_this_turn.iter().any(|record| {
             record.object_id == object_id
@@ -33044,6 +33061,7 @@ impl GameState {
             condition,
             None,
             TransientContinuousEffectBindings::default(),
+            None,
         )
     }
 
@@ -33069,6 +33087,7 @@ impl GameState {
             condition,
             None,
             bindings,
+            None,
         )
     }
 
@@ -33101,9 +33120,17 @@ impl GameState {
             condition,
             Some(end_permission),
             TransientContinuousEffectBindings::default(),
+            None,
         )
     }
 
+    /// CR 113.7a + CR 400.7: the exact source incarnation of the ability that
+    /// created this effect (`ResolvedAbility::effect_source_ref`). An `UntilEvent` deadline latches that object, or its last known
+    /// information, never a newer object reusing the id. `None` for installs
+    /// with no creating ability, and for the ability-driven installers outside
+    /// `effect.rs::install_transient` that are not yet threaded (they keep the
+    /// pre-existing read). These latch the live source, else its terminal
+    /// battlefield departure.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn add_transient_continuous_effect_inner(
         &mut self,
@@ -33115,6 +33142,7 @@ impl GameState {
         condition: Option<StaticCondition>,
         end_permission: Option<EndEffectPermission>,
         bindings: TransientContinuousEffectBindings,
+        duration_source: Option<ObjectIncarnationRef>,
     ) -> Option<u64> {
         self.transient_duration_begins(source_id, controller, &duration, &affected, bindings)
             .then(|| {
@@ -33127,6 +33155,7 @@ impl GameState {
                     condition,
                     end_permission,
                     bindings,
+                    duration_source,
                 )
             })
     }
@@ -33157,6 +33186,7 @@ impl GameState {
                     None,
                     None,
                     bindings,
+                    None,
                 );
             }
         }
@@ -33197,6 +33227,7 @@ impl GameState {
         condition: Option<StaticCondition>,
         end_permission: Option<EndEffectPermission>,
         bindings: TransientContinuousEffectBindings,
+        duration_source: Option<ObjectIncarnationRef>,
     ) -> u64 {
         let id = self.next_continuous_effect_id;
         self.next_continuous_effect_id += 1;
@@ -33237,8 +33268,26 @@ impl GameState {
         // ability resolves even when its source is gone; if the source has
         // ceased to exist (CR 704.5d / CR 704.5e), its terminal battlefield
         // departure record is the authority for it (CR 608.2i).
-        let duration_event_source = match duration {
-            Duration::UntilEvent { .. } => self
+        //
+        // With a creating ability's source incarnation (`duration_source`), the
+        // deadline binds that exact object while it is live, else its last
+        // known information from its departure record (CR 113.7a + CR 608.2h),
+        // and `None` when it is neither: a newer object reusing the storage id
+        // never stands in for it (CR 400.7). Without one, the live object at
+        // the id, else its terminal battlefield departure.
+        let duration_event_source = match (&duration, duration_source) {
+            (Duration::UntilEvent { .. }, Some(source)) => self
+                .objects
+                .get(&source.object_id)
+                .filter(|object| object.incarnation == source.incarnation)
+                .map(|object| trigger_source_context_for_latch(self, object))
+                .or_else(|| {
+                    self.incarnation_departure_record(source)
+                        .and_then(ZoneChangeRecord::trigger_source_context)
+                        .cloned()
+                })
+                .map(Box::new),
+            (Duration::UntilEvent { .. }, None) => self
                 .objects
                 .get(&source_id)
                 .map(|source| trigger_source_context_for_latch(self, source))
