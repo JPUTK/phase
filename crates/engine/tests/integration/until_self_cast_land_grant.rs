@@ -23,6 +23,8 @@
 //!   incarnation its own cost created — if the card leaves exile, returns to
 //!   hand (CR 903.9b declined) and is exiled again, casting it ends only the
 //!   later activation's grant.
+//! - CR 400.7j: an ability that exiles its own source binds "this card" to the
+//!   exiled object, so casting it from exile ends the grant.
 
 use engine::ai_support::legal_actions_full;
 use engine::game::mana_abilities::is_mana_ability;
@@ -41,6 +43,9 @@ use engine::types::zones::Zone;
 const EMRAKUL: &str = "When you cast this spell, untap all lands you control.\nFlying, trample\nWard—Sacrifice three permanents.\n{3}, Exile this card from your hand: Target land gains \"{T}: Add {C}{C}\" until this card is cast from exile. You may cast this card for as long as it remains exiled.";
 const COMMAND_BEACON: &str = "{T}: Add {C}.\n{T}, Sacrifice this land: Put your commander into your hand from the command zone.";
 const GLAMOROUS_OUTLAW: &str = "When this creature enters, it deals 2 damage to each opponent and you scry 2.\n{2}, Exile this card from your hand: Target land gains \"{T}: Add {U}, {B}, or {R}\" until this card is cast from exile. You may cast this card for as long as it remains exiled.";
+
+/// An ability that exiles its own source during resolution, rather than as a cost.
+const RESOLUTION_EXILER: &str = "{T}: Exile this creature. Target land gains \"{T}: Add {C}{C}.\" until this card is cast from exile. You may cast this card for as long as it remains exiled.";
 
 fn colorless(count: usize) -> Vec<ManaUnit> {
     (0..count)
@@ -716,4 +721,91 @@ fn casting_the_card_again_after_it_left_exile_ends_only_its_own_grant() {
     assert!(grant_effect_on(&runner, emrakul, land_b).is_none());
     assert!(has_colorless_pair_ability(&runner, land_a));
     assert!(grant_effect_on(&runner, emrakul, land_a).is_some());
+}
+
+/// R10 (CR 400.7j): the ability exiles its own source as part of its effect, so
+/// the effect's other parts find the exiled card: "this card" in the deadline is
+/// that exiled object, not the battlefield creature the ability came from.
+/// Casting it from exile ends the grant.
+#[test]
+fn an_ability_that_exiles_its_own_source_binds_the_deadline_to_the_exiled_card() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature_from_oracle(P0, "Resolution Exiler", 1, 1, RESOLUTION_EXILER)
+        .id();
+    let land = scenario.add_basic_land(P0, ManaColor::Green);
+    let mut runner = scenario.build();
+
+    let index = runner.state().objects[&source]
+        .abilities
+        .iter()
+        .position(|ability| ability.kind == AbilityKind::Activated)
+        .expect("the source has an activated ability");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the activation is legal");
+    while matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ) {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(land)),
+            })
+            .expect("the land is a legal target");
+    }
+    runner.advance_until_stack_empty();
+
+    // Reach: the ability exiled its source, granted the land, and let the
+    // exiled card be cast.
+    assert_eq!(runner.state().objects[&source].zone, Zone::Exile);
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        runner.state().objects[&source]
+            .casting_permissions
+            .iter()
+            .filter(|permission| matches!(permission, CastingPermission::PlayFromExile { .. }))
+            .count(),
+        1,
+        "{:?}",
+        runner.state().objects[&source].casting_permissions
+    );
+    assert!(has_colorless_pair_ability(&runner, land));
+    assert_eq!(
+        runner
+            .state()
+            .transient_continuous_effects
+            .iter()
+            .filter(|effect| effect.source_id == source
+                && matches!(effect.duration, Duration::UntilEvent { .. }))
+            .count(),
+        1
+    );
+
+    // CR 400.7j: the deadline is bound to the exiled card.
+    let captured = captured_source(
+        grant_effect_from(&runner, source).expect("the ability installed its grant"),
+    );
+    assert_eq!(
+        captured,
+        (
+            ObjectIncarnationRef::from_object(&runner.state().objects[&source]),
+            Zone::Exile
+        )
+    );
+
+    let _ = runner.cast(source).commit();
+
+    // Reach: the card was cast from exile.
+    let card = &runner.state().objects[&source];
+    assert_eq!(card.zone, Zone::Stack);
+    assert_eq!(card.cast_from_zone, Some(Zone::Exile));
+
+    assert!(!has_colorless_pair_ability(&runner, land));
+    assert!(grant_effect_from(&runner, source).is_none());
 }

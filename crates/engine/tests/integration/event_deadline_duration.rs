@@ -13,7 +13,7 @@ use engine::types::ability::{AbilityKind, CastingPermission, Duration, Effect};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -31,6 +31,9 @@ const UNYARO: &str = "At the beginning of your end step, untap all creatures. Th
 
 /// The target: a flier that also gains its controller life on every creature cast.
 const WATCHER: &str = "Flying\nWhenever a player casts a creature spell, you gain 1 life.";
+
+/// A delayed triggered ability whose payload carries a source-independent event deadline.
+const DELAYED_FLIER: &str = "{T}: At the beginning of your next upkeep, creatures you control gain flying until a player casts a creature spell.";
 
 fn mana(kinds: &[ManaType]) -> Vec<ManaUnit> {
     kinds
@@ -411,6 +414,138 @@ fn soul_sculptor_effect_ends_when_its_source_left_before_the_ability_resolved() 
     assert!(
         watcher_has_abilities(&board.runner, board.watcher),
         "CR 611.2a + CR 601.2i: a creature spell becoming cast ends the effect"
+    );
+}
+
+/// Declare no attackers or blockers, else pass priority, until `done` holds.
+fn pass_until(runner: &mut GameRunner, done: impl Fn(&GameRunner) -> bool) {
+    for _ in 0..300 {
+        if done(runner) {
+            return;
+        }
+        let action = match runner.state().waiting_for {
+            WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                attacks: vec![],
+                bands: vec![],
+            },
+            WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                assignments: vec![],
+            },
+            _ => GameAction::PassPriority,
+        };
+        runner
+            .act(action)
+            .expect("an empty attack or block declaration or a priority pass is legal");
+    }
+    panic!("the awaited game state was never reached");
+}
+
+fn has_flying(runner: &GameRunner, object: ObjectId) -> bool {
+    runner.state().objects[&object].has_keyword(&Keyword::Flying)
+}
+
+/// R9 (CR 113.7a + CR 608.2h + CR 611.2a + CR 603.7e + CR 400.7): a delayed
+/// triggered ability's source is the source of the ability that created it
+/// (CR 603.7e). That source left the battlefield on an earlier turn, and a newer
+/// graveyard object now holds its id. The effect the delayed ability creates
+/// binds its deadline to the creation-time source's last known information,
+/// never to that newer object, and the source-independent deadline ("until a
+/// player casts a creature spell") still ends it.
+#[test]
+fn a_delayed_effect_deadline_binds_its_creation_source_after_that_source_left_on_an_earlier_turn() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature_from_oracle(P0, "Delayed Flier", 1, 1, DELAYED_FLIER)
+        .id();
+    let mine = scenario.add_creature(P0, "Mine", 2, 2).id();
+    scenario.with_library_top(P0, &["L1", "L2", "L3", "L4"]);
+    scenario.with_library_top(P1, &["M1", "M2", "M3", "M4"]);
+    let destroy = zero_cost_instant(&mut scenario, "Destroy Instant", "Destroy target creature.");
+    let bear = zero_cost_creature(&mut scenario, "Cast Bear");
+    let mut runner = scenario.build();
+    let start = runner.state().turn_number;
+
+    let index = activated_index(&runner, source);
+    runner.activate(source, index).resolve();
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "reach: the activation created the delayed trigger"
+    );
+    let before = ObjectIncarnationRef::from_object(&runner.state().objects[&source]);
+    runner.cast(destroy).target_object(source).resolve();
+    assert_eq!(
+        runner.state().objects[&source].zone,
+        Zone::Graveyard,
+        "reach: the source left the battlefield"
+    );
+
+    let source_ability_on_stack = |runner: &GameRunner| {
+        runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == source)
+    };
+    pass_until(&mut runner, source_ability_on_stack);
+    {
+        let state = runner.state();
+        assert_eq!(state.turn_number, start + 2, "reach: P0's next turn");
+        assert_eq!(state.active_player, P0);
+        assert_eq!(state.phase, Phase::Upkeep);
+        assert!(
+            !state
+                .zone_changes_this_turn
+                .iter()
+                .any(|record| record.object_id == source),
+            "reach: the source left on an earlier turn, so this turn records no departure"
+        );
+    }
+    pass_until(&mut runner, |runner| !source_ability_on_stack(runner));
+
+    assert!(
+        has_flying(&runner, mine),
+        "reach: the delayed ability resolved"
+    );
+    let effect = runner
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .find(|effect| {
+            effect.source_id == source && matches!(effect.duration, Duration::UntilEvent { .. })
+        })
+        .expect("the delayed ability installed its effect");
+    let captured = effect.duration_event_source.as_deref().expect(
+        "CR 113.7a: the deadline carries the creation-time source's last known information",
+    );
+    assert_eq!(captured.identity.reference, before);
+    assert_eq!(captured.identity.expected_zone, Zone::Battlefield);
+    assert_ne!(
+        captured.identity.reference,
+        ObjectIncarnationRef::from_object(&runner.state().objects[&source]),
+        "CR 400.7: the newer graveyard object never stands in for the source"
+    );
+
+    pass_until(&mut runner, |runner| {
+        runner.state().phase == Phase::PreCombatMain && runner.state().stack.is_empty()
+    });
+    let _ = runner.cast(bear).commit();
+    assert!(
+        on_stack(&runner, bear),
+        "reach: the creature spell has not resolved"
+    );
+    assert!(
+        !has_flying(&runner, mine),
+        "CR 611.2a + CR 601.2i: a creature spell becoming cast ends the effect"
+    );
+    assert!(
+        !runner
+            .state()
+            .transient_continuous_effects
+            .iter()
+            .any(|effect| effect.source_id == source),
+        "the ended effect is removed"
     );
 }
 

@@ -250,9 +250,9 @@ fn evaluate_static_condition_for_ability(
 /// pay-to-end permission into the state-level construction authority so the
 /// field rides INSIDE the journaled `ResolvedContinuousEffectCommand` rather
 /// than being post-stamped after the fact (which is what `duration_subject`
-/// does, and which a journal replay would lose). It also threads the creating
-/// ability's source binding (`ResolvedAbility::effect_source_ref`) for an
-/// `UntilEvent` deadline.
+/// does, and which a journal replay would lose). It also passes the creating
+/// ability, so an `UntilEvent` deadline is bound to that ability's own source
+/// (`ResolvedAbility::effect_source_ref`).
 ///
 /// Every `register_transient_effect` branch installs through here, so a branch
 /// that forgets the permission is impossible to write: the parameter is
@@ -297,7 +297,7 @@ fn install_transient(
         },
         // CR 113.7a: an event deadline is bound to the creating ability's own
         // source (or its last known information), not to whatever now holds the id.
-        ability.effect_source_ref(state),
+        Some(ability),
     )
 }
 

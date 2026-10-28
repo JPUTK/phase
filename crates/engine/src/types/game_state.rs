@@ -27155,16 +27155,7 @@ pub struct TransientContinuousEffect {
     /// non-current sentinel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_subject: Option<ObjectIncarnationRef>,
-    /// CR 611.2a + CR 400.7: the source context a `Duration::UntilEvent`
-    /// effect's event is matched against, captured when the effect is created
-    /// (as a `WhenNextEvent` delayed trigger carries one). For an effect
-    /// installed through `effect.rs::install_transient`, it is captured from the
-    /// creating ability's own source incarnation: its last known information if
-    /// that incarnation has since left its zone, and `None` (the deadline never
-    /// matches) if that incarnation is neither live nor departed this turn. For
-    /// other installs it is captured from the live source. `None` for every
-    /// other duration. Rides inside the journaled
-    /// `ResolvedContinuousEffectCommand`, so replay installs it verbatim.
+    /// CR 611.2a + CR 400.7: the source context a `Duration::UntilEvent` effect's event is matched against, captured when the effect is created (as a `WhenNextEvent` delayed trigger carries one). Where the installer passes the creating ability — today only `effect.rs::install_transient`, the GenericEffect installer — it is captured from that ability's own source (`ResolvedAbility::effect_source_ref`): the live object while it is that incarnation, else its last known information, from its departure record this turn, else the source context the ability itself carries (CR 113.7a + CR 603.7d / CR 603.7e); a newer object at the same id never stands in, and it is `None` (the deadline never matches) only when none of these exists. Every other install passes no creating ability: the three public `add_transient_continuous_effect*` wrappers and `add_simultaneous_transient_continuous_effects`, and through them the other ability-driven effect handlers. For other installs it is captured from the live source, else its terminal battlefield departure record. `None` for every other duration. Rides inside the journaled `ResolvedContinuousEffectCommand`, so replay installs it verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_event_source: Option<Box<TriggerSourceContext>>,
     /// CR 116.2c: see [`EndEffectPermission`]. `None` for every effect with no
@@ -33124,13 +33115,7 @@ impl GameState {
         )
     }
 
-    /// CR 113.7a + CR 400.7: the exact source incarnation of the ability that
-    /// created this effect (`ResolvedAbility::effect_source_ref`). An `UntilEvent` deadline latches that object, or its last known
-    /// information, never a newer object reusing the id. `None` for installs
-    /// with no creating ability, and for the ability-driven installers outside
-    /// `effect.rs::install_transient` that are not yet threaded (they keep the
-    /// pre-existing read). These latch the live source, else its terminal
-    /// battlefield departure.
+    /// CR 611.2a + CR 113.7a + CR 400.7: `creating_ability` is the ability whose resolution creates this effect; an `UntilEvent` deadline is matched against that ability's own source (see `TransientContinuousEffect::duration_event_source`). When `Some`, `source_id` is that ability's source. Only `effect.rs::install_transient`, the GenericEffect installer, passes it. Every other install passes `None`: the three public wrappers and `add_simultaneous_transient_continuous_effects`, and through them static, replacement, cost and rules-generated installs and the other ability-driven effect handlers. These latch the live source, else its terminal battlefield departure.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn add_transient_continuous_effect_inner(
         &mut self,
@@ -33142,8 +33127,9 @@ impl GameState {
         condition: Option<StaticCondition>,
         end_permission: Option<EndEffectPermission>,
         bindings: TransientContinuousEffectBindings,
-        duration_source: Option<ObjectIncarnationRef>,
+        creating_ability: Option<&ResolvedAbility>,
     ) -> Option<u64> {
+        debug_assert!(creating_ability.is_none_or(|ability| ability.source_id == source_id));
         self.transient_duration_begins(source_id, controller, &duration, &affected, bindings)
             .then(|| {
                 self.install_started_transient_continuous_effect(
@@ -33155,7 +33141,7 @@ impl GameState {
                     condition,
                     end_permission,
                     bindings,
-                    duration_source,
+                    creating_ability,
                 )
             })
     }
@@ -33227,7 +33213,7 @@ impl GameState {
         condition: Option<StaticCondition>,
         end_permission: Option<EndEffectPermission>,
         bindings: TransientContinuousEffectBindings,
-        duration_source: Option<ObjectIncarnationRef>,
+        creating_ability: Option<&ResolvedAbility>,
     ) -> u64 {
         let id = self.next_continuous_effect_id;
         self.next_continuous_effect_id += 1;
@@ -33269,22 +33255,27 @@ impl GameState {
         // ceased to exist (CR 704.5d / CR 704.5e), its terminal battlefield
         // departure record is the authority for it (CR 608.2i).
         //
-        // With a creating ability's source incarnation (`duration_source`), the
-        // deadline binds that exact object while it is live, else its last
-        // known information from its departure record (CR 113.7a + CR 608.2h),
-        // and `None` when it is neither: a newer object reusing the storage id
-        // never stands in for it (CR 400.7). Without one, the live object at
-        // the id, else its terminal battlefield departure.
-        let duration_event_source = match (&duration, duration_source) {
-            (Duration::UntilEvent { .. }, Some(source)) => self
-                .objects
-                .get(&source.object_id)
-                .filter(|object| object.incarnation == source.incarnation)
-                .map(|object| trigger_source_context_for_latch(self, object))
-                .or_else(|| {
-                    self.incarnation_departure_record(source)
-                        .and_then(ZoneChangeRecord::trigger_source_context)
-                        .cloned()
+        // With a creating ability — passed only by `effect.rs::install_transient`, the GenericEffect installer — the deadline binds that ability's own source (`ResolvedAbility::effect_source_ref`): the exact object while it is live, else its last known information — its departure record this turn (CR 113.7a + CR 608.2h), else the source context the ability carries across turns (CR 603.7d / CR 603.7e) — and `None` when none exists: a newer object reusing the storage id never stands in for it (CR 400.7). Every other install (the public wrappers and `add_simultaneous_transient_continuous_effects`, and through them the other ability-driven handlers) passes none: the live object at the id, else its terminal battlefield departure.
+        let duration_event_source = match (&duration, creating_ability) {
+            (Duration::UntilEvent { .. }, Some(ability)) => ability
+                .effect_source_ref(self)
+                .and_then(|source| {
+                    self.objects
+                        .get(&source.object_id)
+                        .filter(|object| object.incarnation == source.incarnation)
+                        .map(|object| trigger_source_context_for_latch(self, object))
+                        .or_else(|| {
+                            self.incarnation_departure_record(source)
+                                .and_then(ZoneChangeRecord::trigger_source_context)
+                                .cloned()
+                        })
+                        .or_else(|| {
+                            ability
+                                .trigger_source
+                                .as_ref()
+                                .filter(|context| context.identity.reference == source)
+                                .cloned()
+                        })
                 })
                 .map(Box::new),
             (Duration::UntilEvent { .. }, None) => self
