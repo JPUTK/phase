@@ -33253,7 +33253,7 @@ impl GameState {
         // never re-read from `objects`. CR 113.7a: an activated or triggered
         // ability resolves even when its source is gone; if the source has
         // ceased to exist (CR 704.5d / CR 704.5e), its terminal battlefield
-        // departure record is the authority for it (CR 608.2i).
+        // departure record is the authority for it (CR 608.2h).
         //
         // With a creating ability — passed only by `effect.rs::install_transient`, the GenericEffect installer — the deadline binds that ability's own source (`ResolvedAbility::effect_source_ref`): the exact object while it is live, else its last known information — its departure record this turn (CR 113.7a + CR 608.2h), else the source context the ability carries across turns (CR 603.7d / CR 603.7e) — and `None` when none exists: a newer object reusing the storage id never stands in for it (CR 400.7). Every other install (the public wrappers and `add_simultaneous_transient_continuous_effects`, and through them the other ability-driven handlers) passes none: the live object at the id, else its terminal battlefield departure.
         let duration_event_source = match (&duration, creating_ability) {
