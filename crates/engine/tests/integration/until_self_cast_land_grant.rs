@@ -27,6 +27,7 @@
 //!   exiled object, so casting it from exile ends the grant.
 
 use engine::ai_support::legal_actions_full;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::mana_abilities::is_mana_ability;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
