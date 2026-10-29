@@ -4340,8 +4340,9 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
     // CR 615.5 + CR 400.2: the arena keeps every rider for the rest of the game, including
     // riders whose shield ended and riders whose host this projection hid (`hide_card` ran
     // above and cleared the host's definitions). An entry that no `runtime_execute` in the
-    // projected state names, and that names a hidden object as its source or payment
-    // source, becomes an inert `NoOp` with source `ObjectId(0)`, so a single snapshot
+    // projected state names, and that names a hidden object as its source, or whose latched
+    // source context names a hidden mana source or linked-exile member, becomes an inert
+    // `NoOp` with source `ObjectId(0)`, so a single snapshot
     // cannot pair that hidden id with the rider's effect. Its position stays, because live
     // handles resolve by position. A rider some definition still names keeps the payment
     // redaction below unchanged. When no rider names a hidden object, the reference walk
@@ -4729,6 +4730,7 @@ fn redact_zone_change_record(record: &mut crate::types::game_state::ZoneChangeRe
     record.linked_exile_snapshot.clear();
     record.is_token = false;
     record.combat_status = Default::default();
+    record.block_pairs.clear();
     record.co_departed.clear();
 }
 
