@@ -88,7 +88,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
-use crate::types::events::{ClashResult, PlayerActionKind};
+use crate::types::event_kinds::{ClashResult, PlayerActionKind};
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::{Phase, PhaseGroup};
@@ -647,7 +647,7 @@ fn rewrite_cost_x_in_condition(cond: &mut crate::types::ability::AbilityConditio
 /// mirror image of the lying green, and just as dishonest.
 fn cost_x_sibling_slot_still_unbound(def: &crate::types::ability::AbilityDefinition) -> bool {
     use crate::types::ability::AbilityCondition;
-    use crate::types::game_state::TargetSelectionConstraint;
+    use crate::types::game_state_kinds::TargetSelectionConstraint;
 
     fn condition_has_bare_x(cond: &AbilityCondition) -> bool {
         match cond {
@@ -735,7 +735,7 @@ fn cost_x_sibling_slot_still_unbound(def: &crate::types::ability::AbilityDefinit
 /// it is correct at both selection time and resolution time.
 fn rewrite_cost_x_in_ability(def: &mut crate::types::ability::AbilityDefinition) {
     use super::oracle_replacement::rewrite_variable_x_to_cost_x_paid;
-    use crate::types::game_state::TargetSelectionConstraint;
+    use crate::types::game_state_kinds::TargetSelectionConstraint;
 
     if let Some(cond) = def.condition.as_mut() {
         rewrite_cost_x_in_condition(cond);
@@ -2802,7 +2802,7 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         && !trigger_condition_excludes_mana_activations(def.condition.as_ref())
     {
         if let Some(execute) = def.execute.as_deref_mut() {
-            if crate::game::mana_abilities::could_be_triggered_mana_ability_body(execute) {
+            if crate::types::ability::could_be_triggered_mana_ability_body(execute) {
                 *execute.effect = Effect::unimplemented(
                     "activation_triggered_mana_ability",
                     "a mana-producing trigger on activating a mana ability resolves \
@@ -2821,7 +2821,7 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         TriggerMode::TapsForMana | TriggerMode::ManaAdded | TriggerMode::ManaAbilityProduced
     ) {
         if let Some(execute) = def.execute.as_deref_mut() {
-            if crate::game::mana_abilities::could_be_triggered_mana_ability_body(execute) {
+            if crate::types::ability::could_be_triggered_mana_ability_body(execute) {
                 super::oracle_effect::refuse_linked_paid_cast_in_mana_ability(
                     execute,
                     def.description.as_deref().unwrap_or_default(),
@@ -4091,7 +4091,7 @@ fn lift_filter_shared_quality_parent_target_to_triggering_source(filter: &mut Ta
 /// trigger source must be the entering object).
 ///
 /// A hand reveal that parks a card choice
-/// (`reveal_hand::effect_parks_reveal_card_choice`) also returns `true`: a later
+/// (`types::ability::effect_parks_reveal_card_choice`) also returns `true`: a later
 /// `ParentTarget` binds to the chosen revealed card, whatever player the reveal
 /// targets.
 ///
@@ -4127,7 +4127,7 @@ fn introduces_chosen_object_target(effect: &Effect) -> bool {
     // event. Its player target (`Controller` / `ScopedPlayer` under a per-player
     // scope, `TriggeringPlayer`, …) is not a chosen object filter, so the `Typed`
     // test below cannot see it. Shares the resolver's card-parking authority.
-    if crate::game::effects::reveal_hand::effect_parks_reveal_card_choice(effect) {
+    if crate::types::ability::effect_parks_reveal_card_choice(effect) {
         return true;
     }
     // CR 608.2c + CR 608.2d: a zone choice ("choose a card at random exiled
@@ -5144,7 +5144,7 @@ fn cost_contains_one_of(cost: &AbilityCost) -> bool {
 }
 
 fn reflexive_optional_cost_payable_by_resolution_prompt(cost: &AbilityCost) -> bool {
-    if !crate::game::costs::supported_at_resolution(cost) {
+    if !crate::types::ability::supported_at_resolution(cost) {
         return false;
     }
     match cost {
@@ -5201,7 +5201,7 @@ fn reflexive_optional_cost_payable_by_resolution_prompt(cost: &AbilityCost) -> b
 /// a typed permanent population. This excludes self/granting-object/any
 /// targets, aggregate requirements, and the `u32::MAX` X/any-number sentinel.
 fn reflexive_optional_direct_cost(cost: &AbilityCost) -> bool {
-    crate::game::costs::is_direct_resolution_optional_payment_branch(cost)
+    crate::types::ability::is_direct_resolution_optional_payment_branch(cost)
         || matches!(
             cost,
             AbilityCost::Sacrifice(cost)
@@ -10683,7 +10683,7 @@ fn try_extract_not_completed_dungeon(
     lower: &str,
     text: &str,
 ) -> Option<(String, Option<TriggerCondition>)> {
-    use crate::game::dungeon::DungeonId;
+    use crate::types::dungeon::DungeonId;
 
     let prefix = "if you haven't completed ";
     let pos = tp.find(prefix)?;

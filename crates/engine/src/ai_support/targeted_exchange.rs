@@ -8,6 +8,7 @@
 use crate::ai_support::{validated_candidate_actions_for_semantic_owner, CandidateAction};
 use crate::game::effects::resolve_ability_chain;
 use crate::game::engine::apply_interaction_for_simulation;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::layers::flush_layers;
 use crate::game::sba::check_state_based_actions;
 use crate::types::ability::{DamageSource, Effect, ResolvedAbility, TargetFilter, TargetRef};
@@ -1763,6 +1764,8 @@ mod tests {
                     owner: TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![grant_fight_static()],
                     enter_with_counters: vec![],

@@ -1,3 +1,4 @@
+use crate::game::cost_payability::AbilityCostPayability;
 use crate::types::ability::{
     is_variable_remove_counter_cost_count, AbilityBlockKind, AbilityBlockReason, AbilityCondition,
     AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationManaPaymentRestriction,
@@ -5489,6 +5490,35 @@ struct GraveyardPermissionSource<'a> {
     required_cast_keyword: Option<KeywordKind>,
     /// CR 109.5 + CR 404.1: whose graveyards this permission reaches.
     pool: GraveyardPermissionPool,
+}
+
+/// The [`GraveyardPermissionPool`] membership check. It reads the live game
+/// state, so it is defined here beside its one caller.
+pub trait GraveyardPermissionPoolExt {
+    /// Whether `card` is in this pool for `caster`: "your graveyard" is the
+    /// graveyard container the caster reads (CR 400.1 + CR 109.5).
+    fn admits(
+        self,
+        state: &crate::types::game_state::GameState,
+        card: &crate::game::game_object::GameObject,
+        caster: PlayerId,
+    ) -> bool;
+}
+
+impl GraveyardPermissionPoolExt for GraveyardPermissionPool {
+    fn admits(
+        self,
+        state: &crate::types::game_state::GameState,
+        card: &crate::game::game_object::GameObject,
+        caster: PlayerId,
+    ) -> bool {
+        match self {
+            GraveyardPermissionPool::OwnGraveyard => {
+                state.object_in_players_zone(card, Zone::Graveyard, caster)
+            }
+            GraveyardPermissionPool::AnyGraveyard => true,
+        }
+    }
 }
 
 impl GraveyardPermissionSource<'_> {
@@ -19957,7 +19987,7 @@ pub(crate) fn requires_additional_cost_declaration_before_targets(
             if matches!(
                 sub_ability.condition,
                 Some(AbilityCondition::AdditionalCostPaidInstead)
-            ) && crate::game::triggers::extract_target_filter_from_effect(&sub_ability.effect)
+            ) && crate::types::ability::extract_target_filter_from_effect(&sub_ability.effect)
                 .is_some()
             {
                 return true;
@@ -26797,7 +26827,7 @@ pub(crate) fn find_eligible_sacrifice_targets_for_scope(
     filter: &TargetFilter,
     scope: Option<&super::costs::PaymentScope>,
 ) -> Vec<ObjectId> {
-    let skip_cant_sacrifice = matches!(scope, Some(super::costs::PaymentScope::TurnFaceUp { .. }));
+    let is_turn_face_up = matches!(scope, Some(super::costs::PaymentScope::TurnFaceUp { .. }));
     state
         .battlefield
         .iter()
@@ -26809,12 +26839,16 @@ pub(crate) fn find_eligible_sacrifice_targets_for_scope(
             if obj.controller != player {
                 return false;
             }
+            // CR 702.37e: the permanent being turned face up is not excluded — the rule
+            // only requires paying the morph cost, so a face-down permanent matching the
+            // cost's filter may pay it with itself unless the cost says "another", which
+            // the filter carries.
             // CR 701.21a: A permanent with "can't be sacrificed" cannot be sacrificed
             // for any cost regardless of payment scope (e.g. Assault Suit).
             if super::static_abilities::object_has_static_other(state, id, "CantBeSacrificed") {
                 return false;
             }
-            if !skip_cant_sacrifice
+            if !is_turn_face_up
                 && super::static_abilities::player_cant_sacrifice_as_cost(state, player, id)
             {
                 return false;
@@ -30535,7 +30569,6 @@ fn activate_with_cost_carrier(
     // CR 602.2: the record captured before payment is required to place the
     // ability; without one the activation can't complete legally and is
     // reversed (never recorded from post-payment facts).
-    let mut resolved = resolved;
     let record = take_activation_record(&mut resolved, player)?;
     // CR 602.2b + CR 601.2h + CR 608.2h: `resolved.context.cost_removed_counter_amount`
     // already holds this activation's cost-removed counter count: the count was
